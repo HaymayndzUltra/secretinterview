@@ -93,3 +93,71 @@ out/
 
 # Electron
 **/node_modules/electron/**
+
+# Electron build outputs
+dist/
+build/
+app/
+release/
+
+# Electron app data
+*.app
+*.dmg
+*.exe
+*.deb
+*.rpm
+*.snap
+*.AppImage
+
+# OS generated files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# Configuration files with sensitive data
+config.json
+settings.json
+*.key
+*.pem
+*.p12
+
+# Whisper model files (usually large)
+*.bin
+*.ggml
+*.gguf
+models/
+
+# Audio/video files (if storing locally)
+*.wav
+*.mp3
+*.mp4
+*.avi
+*.mov
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs specific to your app
+app.log
+error.log
+debug.log
+
+# Package manager lock files (optional - uncomment if you want to ignore)
+# package-lock.json
+# yarn.lock

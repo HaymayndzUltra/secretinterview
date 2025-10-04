@@ -13,9 +13,7 @@ const Settings: React.FC = () => {
   const [testResult, setTestResult] = useState<string | null>(null);
   const [primaryLanguage, setPrimaryLanguage] = useState('auto');
   const [secondaryLanguage, setSecondaryLanguage] = useState('');
-  const [whisperBinaryPath, setWhisperBinaryPath] = useState('');
-  const [whisperModelPath, setWhisperModelPath] = useState('');
-  const [useSystemAudio, setUseSystemAudio] = useState(false);
+  const [deepgramApiKey, setDeepgramApiKey] = useState('');
 
   useEffect(() => {
     loadConfig();
@@ -24,16 +22,13 @@ const Settings: React.FC = () => {
   const loadConfig = async () => {
     try {
       const config = await window.electronAPI.getConfig();
-      const normalizedConfig = config || {};
-      setApiKey(normalizedConfig.openai_key || '');
-      setApiModel(normalizedConfig.gpt_model || 'gpt-4o');
-      setApiBase(normalizedConfig.api_base || '');
-      setApiCallMethod(normalizedConfig.api_call_method || 'direct');
-      setPrimaryLanguage(normalizedConfig.primaryLanguage || 'auto');
-      setSecondaryLanguage(normalizedConfig.secondaryLanguage || '');
-      setWhisperBinaryPath(normalizedConfig.whisperBinaryPath || '');
-      setWhisperModelPath(normalizedConfig.whisperModelPath || '');
-      setUseSystemAudio(Boolean(normalizedConfig.useSystemAudio));
+      setApiKey(config.openai_key || '');
+      setApiModel(config.gpt_model || 'gpt-4o');
+      setApiBase(config.api_base || '');
+      setApiCallMethod(config.api_call_method || 'direct');
+      setPrimaryLanguage(config.primaryLanguage || 'auto');
+      setSecondaryLanguage(config.secondaryLanguage || '');
+      setDeepgramApiKey(config.deepgram_api_key || '');
     } catch (err) {
       console.error('Failed to load configuration', err);
       setError('Failed to load configuration. Please check your settings.');
@@ -48,10 +43,7 @@ const Settings: React.FC = () => {
         api_base: apiBase,
         api_call_method: apiCallMethod,
         primaryLanguage: primaryLanguage,
-        secondaryLanguage: secondaryLanguage,
-        whisperBinaryPath: whisperBinaryPath,
-        whisperModelPath: whisperModelPath,
-        useSystemAudio,
+        deepgram_api_key: deepgramApiKey,
       });
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 3000);
@@ -108,12 +100,10 @@ const Settings: React.FC = () => {
           value={apiBase}
           onChange={(e) => setApiBase(e.target.value)}
           className="input input-bordered w-full"
-          placeholder="http://localhost:11434"
         />
         <label className="label">
           <span className="label-text-alt">
-            For OpenAI: Enter proxy URL if using API proxy. For example: https://your-proxy.com/v1<br/>
-            For Ollama: Enter http://localhost:11434 (or your Ollama server URL)
+            Enter proxy URL if using API proxy. For example: https://your-proxy.com/v1
           </span>
         </label>
       </div>
@@ -124,13 +114,9 @@ const Settings: React.FC = () => {
           value={apiModel}
           onChange={(e) => setApiModel(e.target.value)}
           className="input input-bordered w-full"
-          placeholder="llama3:8b"
         />
         <label className="label">
-          <span className="label-text-alt">
-            For OpenAI: Use gpt-4, gpt-3.5-turbo, etc.<br/>
-            For Ollama: Use llama3:8b, llama3:latest, codellama, etc.
-          </span>
+          <span className="label-text-alt">Please use a model supported by your API. Preferably gpt-4.</span>
         </label>
       </div>
       <div className="mb-4">
@@ -144,22 +130,14 @@ const Settings: React.FC = () => {
           <option value="proxy">Proxy</option>
         </select>
       </div>
-      <div className="mb-4 form-control">
-        <label className="label cursor-pointer">
-          <span className="label-text">Capture system audio instead of microphone</span>
-          <input
-            type="checkbox"
-            className="toggle"
-            checked={useSystemAudio}
-            onChange={(e) => setUseSystemAudio(e.target.checked)}
-          />
-        </label>
-        <label className="label">
-          <span className="label-text-alt">
-            When enabled, you will be prompted to allow screen recording so the app can capture
-            system audio.
-          </span>
-        </label>
+      <div className="mb-4">
+        <label className="label">Deepgram API Key</label>
+        <input
+          type="password"
+          value={deepgramApiKey}
+          onChange={(e) => setDeepgramApiKey(e.target.value)}
+          className="input input-bordered w-full"
+        />
       </div>
       <div className="mb-4">
         <label className="label">Primary Language</label>
@@ -174,45 +152,6 @@ const Settings: React.FC = () => {
             </option>
           ))}
         </select>
-      </div>
-      <div className="mb-4">
-        <label className="label">Secondary Language (Optional)</label>
-        <input
-          type="text"
-          value={secondaryLanguage}
-          onChange={(e) => setSecondaryLanguage(e.target.value)}
-          className="input input-bordered w-full"
-          placeholder="es"
-        />
-      </div>
-      <div className="mb-4">
-        <h2 className="text-xl font-semibold mb-2">Local Whisper</h2>
-        <label className="label">Whisper Binary Path</label>
-        <input
-          type="text"
-          value={whisperBinaryPath}
-          onChange={(e) => setWhisperBinaryPath(e.target.value)}
-          className="input input-bordered w-full"
-          placeholder="/path/to/whisper-stream"
-        />
-        <label className="label">
-          <span className="label-text-alt">
-            Leave blank to use the bundled whisper-stream binary in the app resources directory.
-          </span>
-        </label>
-        <label className="label">Whisper Model Path</label>
-        <input
-          type="text"
-          value={whisperModelPath}
-          onChange={(e) => setWhisperModelPath(e.target.value)}
-          className="input input-bordered w-full"
-          placeholder="/path/to/ggml-base.en.bin"
-        />
-        <label className="label">
-          <span className="label-text-alt">
-            Models should be ggml/gguf whisper checkpoints compatible with whisper.cpp.
-          </span>
-        </label>
       </div>
       <div className="flex justify-between mt-4">
         <button onClick={handleSave} className="btn btn-primary">

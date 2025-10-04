@@ -11,6 +11,7 @@
     "publish": "electron-forge publish"
   },
   "dependencies": {
+    "@deepgram/sdk": "^3.6.0",
     "@ffmpeg/ffmpeg": "^0.12.10",
     "@ffmpeg/util": "^0.12.1",
     "@reduxjs/toolkit": "^2.2.7",

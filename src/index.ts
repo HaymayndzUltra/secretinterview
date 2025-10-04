@@ -17,7 +17,7 @@ import FormData from "form-data";
 import fs from "fs";
 import path from "path";
 import { Buffer } from "buffer";
-import { WhisperStreamBridge, WhisperStartOptions } from "./main/whisperBridge";
+import { createClient, LiveTranscriptionEvents } from "@deepgram/sdk";
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
 import electronSquirrelStartup from "electron-squirrel-startup";
@@ -25,8 +25,6 @@ import electronSquirrelStartup from "electron-squirrel-startup";
 if (electronSquirrelStartup) {
   app.quit();
 }
-
-const whisperBridge = new WhisperStreamBridge();
 
 const createWindow = (): void => {
   const mainWindow = new BrowserWindow({
@@ -53,24 +51,15 @@ const createWindow = (): void => {
     }
   );
 
-  const allowedPermissions = new Set([
-    "media",
-    "display-capture",
-    "audioCapture",
-  ]);
-
   mainWindow.webContents.session.setPermissionRequestHandler(
     (webContents, permission, callback) => {
-      if (allowedPermissions.has(permission)) {
+      if (permission === "media") {
         callback(true);
-        return;
+      } else {
+        callback(false);
       }
-
-      callback(false);
     }
   );
-
-  whisperBridge.setWindow(mainWindow);
 
   mainWindow.loadURL(MAIN_WINDOW_WEBPACK_ENTRY + "#/main_window");
 //  mainWindow.webContents.openDevTools();
@@ -146,7 +135,6 @@ app.on("ready", createWindow);
 // dock icon is clicked and there are no other windows open.
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {
-    whisperBridge.stop();
     app.quit();
   }
 });
@@ -177,40 +165,12 @@ type TypedElectronStore = ElectronStore<StoreSchema> & {
 const store = new ElectronStore<StoreSchema>() as TypedElectronStore;
 
 ipcMain.handle("get-config", () => {
-  return store.get("config") ?? {};
+  return store.get("config");
 });
 
 ipcMain.handle("set-config", (event, config) => {
-  const existingConfig = (store.get("config") ?? {}) as Record<string, any>;
-  store.set("config", {
-    ...existingConfig,
-    ...config,
-  });
+  store.set("config", config);
 });
-
-ipcMain.handle("whisper:start", (event, options: WhisperStartOptions) => {
-  return whisperBridge.start(options);
-});
-
-ipcMain.handle("whisper:stop", () => {
-  whisperBridge.stop();
-});
-
-ipcMain.on(
-  "whisper:audio-chunk",
-  (event, chunk: ArrayBuffer | Buffer | Uint8Array | null | undefined) => {
-    if (!chunk) {
-      return;
-    }
-    if (Buffer.isBuffer(chunk)) {
-      whisperBridge.pushAudioChunk(chunk);
-    } else if (chunk instanceof Uint8Array) {
-      whisperBridge.pushAudioChunk(Buffer.from(chunk));
-    } else {
-      whisperBridge.pushAudioChunk(Buffer.from(chunk));
-    }
-  }
-);
 
 ipcMain.handle("parsePDF", async (event, pdfBuffer) => {
   try {
@@ -256,13 +216,10 @@ app.on("before-quit", () => {
     gpt_model: config.gpt_model || "",
     api_call_method: config.api_call_method || "direct",
     primaryLanguage: config.primaryLanguage || "en",
-    secondaryLanguage: config.secondaryLanguage || "",
-    whisperBinaryPath: config.whisperBinaryPath || "",
-    whisperModelPath: config.whisperModelPath || "",
+    deepgram_api_key: config.deepgram_api_key || "",
   };
   store.clear();
   store.set("config", apiInfo);
-  whisperBridge.stop();
 });
 
 ipcMain.handle("get-system-audio-stream", async () => {
@@ -342,58 +299,27 @@ app.on("ready", () => {
 
 ipcMain.handle("test-api-config", async (event, config) => {
   try {
-    // Check if using Ollama API
-    const isOllama = config.api_base && (
-      config.api_base.includes('localhost:11434') || 
-      config.api_base.includes('127.0.0.1:11434') ||
-      config.api_base.includes('ollama')
-    );
+    const axiosInstance = axios.create({
+      baseURL: normalizeApiBaseUrl(config.api_base),
+      headers: {
+        Authorization: `Bearer ${config.openai_key}`,
+        "Content-Type": "application/json",
+      },
+    });
 
-    if (isOllama) {
-      // Test Ollama API
-      const ollamaUrl = config.api_base.includes('http') ? config.api_base : `http://${config.api_base}`;
-      const ollamaApiUrl = `${ollamaUrl}/api/generate`;
-      
-      const response = await axios.post(ollamaApiUrl, {
-        model: config.gpt_model || "llama3:8b",
-        prompt: "Hello, this is a test.",
-        stream: false,
-        options: {
-          temperature: 0.7,
-        }
-      }, { 
-        timeout: 30000 // 30 second timeout for test
-      });
+    const response = await axiosInstance.post("/chat/completions", {
+      model: config.gpt_model || "gpt-3.5-turbo",
+      messages: [{ role: "user", content: "Hello, this is a test." }],
+    });
 
-      if (response.data && response.data.response) {
-        return { success: true };
-      } else {
-        return { success: false, error: "Unexpected Ollama API response structure" };
-      }
+    if (
+      response.data.choices &&
+      response.data.choices[0] &&
+      response.data.choices[0].message
+    ) {
+      return { success: true };
     } else {
-      // Test OpenAI API (original)
-      const axiosInstance = axios.create({
-        baseURL: normalizeApiBaseUrl(config.api_base),
-        headers: {
-          Authorization: `Bearer ${config.openai_key}`,
-          "Content-Type": "application/json",
-        },
-      });
-
-      const response = await axiosInstance.post("/chat/completions", {
-        model: config.gpt_model || "gpt-3.5-turbo",
-        messages: [{ role: "user", content: "Hello, this is a test." }],
-      });
-
-      if (
-        response.data.choices &&
-        response.data.choices[0] &&
-        response.data.choices[0].message
-      ) {
-        return { success: true };
-      } else {
-        return { success: false, error: "Unexpected API response structure" };
-      }
+      return { success: false, error: "Unexpected API response structure" };
     }
   } catch (error) {
     if (axios.isAxiosError(error)) {
@@ -424,72 +350,29 @@ ipcMain.handle("test-api-config", async (event, config) => {
 
 ipcMain.handle("callOpenAI", async (event, { config, messages, signal }) => {
   try {
+    const openai = new OpenAI({
+      apiKey: config.openai_key,
+      baseURL: normalizeApiBaseUrl(config.api_base),
+    });
+
     const abortController = new AbortController();
     if (signal) {
       signal.addEventListener('abort', () => abortController.abort());
     }
 
-    // Check if using Ollama API
-    const isOllama = config.api_base && (
-      config.api_base.includes('localhost:11434') || 
-      config.api_base.includes('127.0.0.1:11434') ||
-      config.api_base.includes('ollama')
-    );
+    const response = await openai.chat.completions.create({
+      model: config.gpt_model || "gpt-3.5-turbo",
+      messages: messages,
+    }, { signal: abortController.signal });
 
-    if (isOllama) {
-      // Ollama API format
-      const ollamaUrl = config.api_base.includes('http') ? config.api_base : `http://${config.api_base}`;
-      const ollamaApiUrl = `${ollamaUrl}/api/generate`;
-      
-      // Convert messages to Ollama format
-      const prompt = messages.map((msg: any) => {
-        if (msg.role === 'user') {
-          return msg.content;
-        } else if (msg.role === 'assistant') {
-          return `Assistant: ${msg.content}`;
-        }
-        return msg.content;
-      }).join('\n\n');
-
-      const response = await axios.post(ollamaApiUrl, {
-        model: config.gpt_model || "llama3:8b",
-        prompt: prompt,
-        stream: false,
-        options: {
-          temperature: 0.7,
-          top_p: 0.9,
-        }
-      }, { 
-        signal: abortController.signal,
-        timeout: 60000 // 60 second timeout for Ollama
-      });
-
-      if (!response.data || !response.data.response) {
-        throw new Error("Unexpected Ollama API response structure");
-      }
-      
-      return { content: response.data.response.trim() };
-    } else {
-      // OpenAI API format (original)
-      const openai = new OpenAI({
-        apiKey: config.openai_key,
-        baseURL: normalizeApiBaseUrl(config.api_base),
-      });
-
-      const response = await openai.chat.completions.create({
-        model: config.gpt_model || "gpt-3.5-turbo",
-        messages: messages,
-      }, { signal: abortController.signal });
-
-      if (
-        !response.choices ||
-        !response.choices[0] ||
-        !response.choices[0].message
-      ) {
-        throw new Error("Unexpected API response structure");
-      }
-      return { content: response.choices[0].message.content };
+    if (
+      !response.choices ||
+      !response.choices[0] ||
+      !response.choices[0].message
+    ) {
+      throw new Error("Unexpected API response structure");
     }
+    return { content: response.choices[0].message.content };
   } catch (error) {
     if (error.name === "AbortError") {
       return { error: "AbortError" };
@@ -524,3 +407,87 @@ function normalizeApiBaseUrl(url: string): string {
   }
   return url;
 }
+
+let deepgramConnection: any = null;
+
+ipcMain.handle("start-deepgram", async (event, config) => {
+  try {
+    if (!config.deepgram_key) {
+      throw new Error("Deepgram API key lose");
+    }
+    const deepgram = createClient(config.deepgram_key);
+    deepgramConnection = deepgram.listen.live({
+      punctuate: true,
+      interim_results: false,
+      model: "general",
+      language: config.primaryLanguage || "en",
+      encoding: "linear16",
+      sample_rate: 16000,
+      endpointing: 1500,
+    });
+
+    deepgramConnection.addListener(LiveTranscriptionEvents.Open, () => {
+      event.sender.send("deepgram-status", { status: "open" });
+    });
+
+    deepgramConnection.addListener(LiveTranscriptionEvents.Close, () => {
+      event.sender.send("deepgram-status", { status: "closed" });
+    });
+
+    deepgramConnection.addListener(
+      LiveTranscriptionEvents.Transcript,
+      (data: any) => {
+        if (
+          data &&
+          data.is_final &&
+          data.channel &&
+          data.channel.alternatives &&
+          data.channel.alternatives[0]
+        ) {
+          const transcript = data.channel.alternatives[0].transcript;
+          if (transcript) {
+            event.sender.send("deepgram-transcript", {
+              transcript,
+              is_final: true,
+            });
+          }
+        }
+      }
+    );
+
+    deepgramConnection.addListener(
+      LiveTranscriptionEvents.Error,
+      (err: any) => {
+        event.sender.send("deepgram-error", err);
+      }
+    );
+
+    await new Promise((resolve, reject) => {
+      deepgramConnection.addListener(LiveTranscriptionEvents.Open, resolve);
+      deepgramConnection.addListener(LiveTranscriptionEvents.Error, reject);
+      setTimeout(() => reject(new Error("Deepgram timeout")), 10000);
+    });
+
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("send-audio-to-deepgram", async (event, audioData) => {
+  if (deepgramConnection) {
+    try {
+      const buffer = Buffer.from(audioData);
+      deepgramConnection.send(buffer);
+    } catch (error) {
+      console.error("failed send data to Deepgram :", error);
+    }
+  }
+});
+
+ipcMain.handle("stop-deepgram", () => {
+  if (deepgramConnection) {
+    deepgramConnection.finish();
+    deepgramConnection = null;
+  }
+});

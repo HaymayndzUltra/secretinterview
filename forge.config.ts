@@ -15,13 +15,12 @@ import { rendererConfig } from './webpack.renderer.config';
 const config: ForgeConfig = {
   packagerConfig: {
     asar: true,
-    icon: './src/assets/icon',
-    name: 'Interview Assistant',
-    extraResource: ['whisper'],
+    icon: './src/assets/icon', 
+    name: 'Interview Assistant'
   },
   rebuildConfig: {},
   makers: [
-    new MakerZIP({}, ['darwin', 'win32', 'linux']),
+    new MakerZIP({}, ['darwin', 'win32']),
     new MakerDMG({}),
     {
       name: '@electron-forge/maker-zip',

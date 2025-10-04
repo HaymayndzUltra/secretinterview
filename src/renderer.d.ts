@@ -21,21 +21,6 @@ export interface ElectronAPI {
     signal?: AbortSignal;
   }) => Promise<{ content: string } | { error: string }>;
   transcribeAudio: (audioBuffer: ArrayBuffer, config: any) => Promise<TranscriptionResult>;
-  startWhisperStream: (options: {
-    language?: string;
-    modelPath?: string;
-    binaryPath?: string;
-    translate?: boolean;
-    sampleRate?: number;
-  }) => Promise<{ state: string; message?: string }>;
-  stopWhisperStream: () => Promise<void>;
-  sendWhisperAudioChunk: (chunk: ArrayBuffer) => void;
-  onWhisperTranscript: (
-    listener: (payload: { text: string; isFinal: boolean }) => void
-  ) => () => void;
-  onWhisperStatus: (
-    listener: (payload: { state: string; message?: string }) => void
-  ) => () => void;
 }
 
 declare global {

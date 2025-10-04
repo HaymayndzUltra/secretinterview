@@ -15,17 +15,18 @@ import { useInterview } from "../contexts/InterviewContext";
 import ReactMarkdown from 'react-markdown';
 
 const InterviewPage: React.FC = () => {
-  const { knowledgeBase, conversations, addConversation } = useKnowledgeBase();
+  const { knowledgeBase, conversations, addConversation, clearConversations } = useKnowledgeBase();
   const { error, setError, clearError } = useError();
   const {
     currentText,
     setCurrentText,
+    aiResult,
+    setAiResult,
     displayedAiResult,
     setDisplayedAiResult,
     lastProcessedIndex,
     setLastProcessedIndex
   } = useInterview();
-
   const [isRecording, setIsRecording] = useState(false);
   const [isConfigured, setIsConfigured] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -34,20 +35,37 @@ const InterviewPage: React.FC = () => {
   const [audioContext, setAudioContext] = useState<AudioContext | null>(null);
   const [processor, setProcessor] = useState<ScriptProcessorNode | null>(null);
   const [autoSubmitTimer, setAutoSubmitTimer] = useState<NodeJS.Timeout | null>(null);
-  const [isModelLoading, setIsModelLoading] = useState(false);
-
   const aiResponseRef = useRef<HTMLDivElement>(null);
-  const pendingPartialRef = useRef<string>("");
-  const lastTranscriptTimeRef = useRef(Date.now());
-  const lastProcessedIndexRef = useRef(lastProcessedIndex);
-  const configRef = useRef<any>(null);
-
-  const SAMPLE_RATE = 16000;
 
   const markdownStyles = `
     .markdown-body {
       font-size: 16px;
       line-height: 1.5;
+    }
+    .markdown-body p {
+      margin-bottom: 16px;
+    }
+    .markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4, .markdown-body h5, .markdown-body h6 {
+      margin-top: 24px;
+      margin-bottom: 16px;
+      font-weight: 600;
+      line-height: 1.25;
+    }
+    .markdown-body code {
+      padding: 0.2em 0.4em;
+      margin: 0;
+      font-size: 85%;
+      background-color: rgba(27,31,35,0.05);
+      border-radius: 3px;
+    }
+    .markdown-body pre {
+      word-wrap: normal;
+      padding: 16px;
+      overflow: auto;
+      font-size: 85%;
+      line-height: 1.45;
+      background-color: #f6f8fa;
+      border-radius: 3px;
     }
   `;
 
@@ -55,165 +73,194 @@ const InterviewPage: React.FC = () => {
     loadConfig();
   }, []);
 
+  const handleAskGPT = async (newContent?: string) => {
+    const contentToProcess = newContent || currentText.slice(lastProcessedIndex).trim();
+    if (!contentToProcess) return;
+
+    setIsLoading(true);
+    try {
+      const config = await window.electronAPI.getConfig();
+      const messages = [
+        ...knowledgeBase.map(item => ({ role: "user", content: item })),
+        ...conversations,
+        { role: "user", content: contentToProcess }
+      ];
+
+      const response = await window.electronAPI.callOpenAI({
+        config: config,
+        messages: messages
+      });
+
+      if ('error' in response) {
+        throw new Error(response.error);
+      }
+
+      const formattedResponse = response.content.trim();
+      addConversation({ role: "user", content: contentToProcess });
+      addConversation({ role: "assistant", content: formattedResponse });
+      setDisplayedAiResult(prev => prev + (prev ? '\n\n' : '') + formattedResponse);
+      setLastProcessedIndex(currentText.length);
+    } catch (error) {
+      setError('Failed to get response from GPT. Please try again.');
+    } finally {
+      setIsLoading(false);
+      if (aiResponseRef.current) {
+        aiResponseRef.current.scrollTop = aiResponseRef.current.scrollHeight;
+      }
+    }
+  };
+
+  const handleAskGPTStable = useCallback(async (newContent: string) => {
+    handleAskGPT(newContent);
+  }, [handleAskGPT]);
+
   useEffect(() => {
-    lastProcessedIndexRef.current = lastProcessedIndex;
-  }, [lastProcessedIndex]);
+    let lastTranscriptTime = Date.now();
+    let checkTimer: NodeJS.Timeout | null = null;
+
+    const handleDeepgramTranscript = (_event: any, data: any) => {
+      if (data.transcript && data.is_final) {
+        setCurrentText((prev: string) => {
+          const newTranscript = data.transcript.trim();
+          if (!prev.endsWith(newTranscript)) {
+            lastTranscriptTime = Date.now();
+            const updatedText = prev + (prev ? '\n' : '') + newTranscript;
+            
+            if (isAutoGPTEnabled) {
+              if (autoSubmitTimer) {
+                clearTimeout(autoSubmitTimer);
+              }
+              const newTimer = setTimeout(() => {
+                const newContent = updatedText.slice(lastProcessedIndex);
+                if (newContent.trim()) {
+                  handleAskGPTStable(newContent);
+                }
+              }, 2000);
+              setAutoSubmitTimer(newTimer);
+            }
+            
+            return updatedText;
+          }
+          return prev;
+        });
+      }
+    };
+
+    const checkAndSubmit = () => {
+      if (isAutoGPTEnabled && Date.now() - lastTranscriptTime >= 2000) {
+        const newContent = currentText.slice(lastProcessedIndex);
+        if (newContent.trim()) {
+          handleAskGPTStable(newContent);
+        }
+      }
+      checkTimer = setTimeout(checkAndSubmit, 1000);
+    };
+
+    window.electronAPI.ipcRenderer.on('deepgram-transcript', handleDeepgramTranscript);
+    checkTimer = setTimeout(checkAndSubmit, 1000);
+
+    return () => {
+      window.electronAPI.ipcRenderer.removeListener('deepgram-transcript', handleDeepgramTranscript);
+      if (checkTimer) {
+        clearTimeout(checkTimer);
+      }
+    };
+  }, [isAutoGPTEnabled, lastProcessedIndex, currentText, handleAskGPTStable, setCurrentText, setLastProcessedIndex]);
 
   const loadConfig = async () => {
     try {
       const config = await window.electronAPI.getConfig();
-      const normalizedConfig = config || {};
-      configRef.current = normalizedConfig;
-      if (normalizedConfig && normalizedConfig.openai_key) {
+      if (config && config.openai_key && config.deepgram_api_key) {
         setIsConfigured(true);
       } else {
-        setIsConfigured(true);
-        setError("OpenAI API key not configured. GPT responses will be unavailable until configured.");
+        setError("OpenAI API key or Deepgram API key not configured. Please check settings.");
       }
     } catch (err) {
-      setIsConfigured(false);
       setError("Failed to load configuration. Please check settings.");
-      configRef.current = {};
     }
   };
 
-  /** Error handling for audio devices */
-  const buildMediaError = useCallback((err: unknown, source: "system" | "microphone" = "microphone"): Error => {
-    const noun = source === "system" ? "system audio" : "microphone";
-    if (err instanceof DOMException) {
-      switch (err.name) {
-        case "NotFoundError":
-        case "DevicesNotFoundError":
-          return new Error(`No ${noun} detected. Connect a device or check permissions.`);
-        case "NotAllowedError":
-        case "SecurityError":
-          return new Error(`${noun} access was denied. Allow permission and retry.`);
-        case "NotReadableError":
-        case "AbortError":
-          return new Error(`${noun} is currently unavailable. Close other apps using it and retry.`);
-        case "OverconstrainedError":
-          return new Error(`Invalid ${noun} configuration. Adjust settings and retry.`);
-        default:
-          return new Error(err.message || `Failed to access ${noun}.`);
-      }
-    }
-    return new Error(`Failed to access ${noun}.`);
-  }, []);
-
-  /** Request system or mic audio stream depending on config */
-  const requestAudioStream = useCallback(async (): Promise<MediaStream> => {
-    const config = (configRef.current ?? {}) as Record<string, any>;
-    const useSystemAudio = Boolean(config.useSystemAudio);
-
-    if (useSystemAudio && navigator.mediaDevices.getDisplayMedia) {
-      try {
-        const displayStream = await navigator.mediaDevices.getDisplayMedia({
-          audio: { sampleRate: SAMPLE_RATE, channelCount: 2 },
-          video: { frameRate: 1 }
-        });
-        displayStream.getVideoTracks().forEach(track => (track.enabled = false));
-        if (!displayStream.getAudioTracks().length) throw new Error("No system audio track detected.");
-        return displayStream;
-      } catch (err) {
-        throw buildMediaError(err, "system");
-      }
-    }
-
+  const startRecording = async () => {
     try {
-      return await navigator.mediaDevices.getUserMedia({
-        audio: { sampleRate: SAMPLE_RATE, channelCount: 1, echoCancellation: true, noiseSuppression: true },
-        video: false
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: false,
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          sampleRate: 16000,
+        },
       });
-    } catch (err) {
-      throw buildMediaError(err, "microphone");
-    }
-  }, [SAMPLE_RATE, buildMediaError]);
+      setUserMedia(stream);
 
-  /** Stop recording cleanly */
-  const stopRecording = useCallback(async () => {
-    if (userMedia) userMedia.getTracks().forEach(track => track.stop());
-    if (audioContext) await audioContext.close().catch(() => {});
+      const config = await window.electronAPI.getConfig();
+      const result = await window.electronAPI.ipcRenderer.invoke('start-deepgram', {
+        deepgram_key: config.deepgram_api_key
+      });
+      if (!result.success) {
+        throw new Error(result.error);
+      }
+
+      const context = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+      setAudioContext(context);
+      const source = context.createMediaStreamSource(stream);
+      const processor = context.createScriptProcessor(4096, 1, 1);
+      setProcessor(processor);
+
+      source.connect(processor);
+      processor.connect(context.destination);
+
+      processor.onaudioprocess = (e: { inputBuffer: { getChannelData: (arg0: number) => any; }; }) => {
+        const inputData = e.inputBuffer.getChannelData(0);
+        const audioData = new Int16Array(inputData.length);
+        for (let i = 0; i < inputData.length; i++) {
+          audioData[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
+        }
+        window.electronAPI.ipcRenderer.invoke('send-audio-to-deepgram', audioData.buffer);
+      };
+
+      setIsRecording(true);
+    } catch (err: any) {
+      setError("Failed to start recording. Please check permissions or try again.");
+    }
+  };
+
+  const stopRecording = () => {
+    if (userMedia) {
+      userMedia.getTracks().forEach((track) => track.stop());
+    }
+    if (audioContext) {
+      audioContext.close();
+    }
     if (processor) {
       processor.disconnect();
-      processor.onaudioprocess = null;
     }
-    if (autoSubmitTimer) clearTimeout(autoSubmitTimer);
-
+    window.electronAPI.ipcRenderer.invoke('stop-deepgram');
+    setIsRecording(false);
     setUserMedia(null);
     setAudioContext(null);
     setProcessor(null);
-    setIsRecording(false);
-    setIsModelLoading(false);
-    pendingPartialRef.current = "";
+  };
 
-    try {
-      await window.electronAPI.stopWhisperStream();
-    } catch {
-      console.warn("Failed to stop Whisper stream");
+  useEffect(() => {
+    loadConfig();
+    return () => {
+      if (isRecording) {
+        stopRecording();
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (aiResponseRef.current) {
+      aiResponseRef.current.scrollTop = aiResponseRef.current.scrollHeight;
     }
-  }, [audioContext, autoSubmitTimer, processor, userMedia]);
+  }, [displayedAiResult]);
 
-  /** Start Whisper + audio streaming */
-  const startRecording = useCallback(async () => {
-    if (isRecording || isModelLoading) return;
-
-    let stream: MediaStream | null = null;
-    let context: AudioContext | null = null;
-    let processorNode: ScriptProcessorNode | null = null;
-
-    try {
-      const config = configRef.current ?? (await window.electronAPI.getConfig());
-      const normalizedConfig = config || {};
-      configRef.current = normalizedConfig;
-      setIsModelLoading(true);
-      const whisperOptions = {
-        language: normalizedConfig?.primaryLanguage,
-        modelPath: normalizedConfig?.whisperModelPath,
-        binaryPath: normalizedConfig?.whisperBinaryPath,
-        sampleRate: SAMPLE_RATE
-      };
-
-      stream = await requestAudioStream();
-      setUserMedia(stream);
-
-      context = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
-      setAudioContext(context);
-
-      const source = context.createMediaStreamSource(stream);
-      processorNode = context.createScriptProcessor(4096, 1, 1);
-      setProcessor(processorNode);
-
-      source.connect(processorNode);
-      processorNode.connect(context.destination);
-
-      processorNode.onaudioprocess = e => {
-        const inputData = e.inputBuffer.getChannelData(0);
-        const pcm = new Int16Array(inputData.length);
-        for (let i = 0; i < inputData.length; i++) {
-          const s = Math.max(-1, Math.min(1, inputData[i]));
-          pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-        }
-        window.electronAPI.sendWhisperAudioChunk(pcm.buffer);
-      };
-
-      await window.electronAPI.startWhisperStream(whisperOptions);
-      setIsRecording(true);
-      setIsModelLoading(false);
-    } catch (err) {
-      const formatted = buildMediaError(err);
-      setError(formatted.message);
-      await stopRecording();
-    }
-  }, [buildMediaError, isModelLoading, isRecording, requestAudioStream, setError, stopRecording]);
-
-  useEffect(() => () => stopRecording(), [stopRecording]);
-
-  /** Simple debounce */
-  const debounce = (fn: Function, delay: number) => {
-    let timeout: NodeJS.Timeout;
+  const debounce = (func: Function, delay: number) => {
+    let timeoutId: NodeJS.Timeout;
     return (...args: any[]) => {
-      clearTimeout(timeout);
-      timeout = setTimeout(() => fn(...args), delay);
+      clearTimeout(timeoutId);
+      timeoutId = setTimeout(() => func(...args), delay);
     };
   };
 
@@ -221,56 +268,63 @@ const InterviewPage: React.FC = () => {
     <div className="flex flex-col h-[calc(100vh-2.5rem)] p-2 space-y-2">
       <style>{markdownStyles}</style>
       <ErrorDisplay error={error} onClose={clearError} />
-
       <div className="flex justify-center items-center space-x-2">
         <button
           onClick={isRecording ? stopRecording : startRecording}
-          disabled={!isConfigured || (isModelLoading && !isRecording)}
+          disabled={!isConfigured}
           className={`btn ${isRecording ? "btn-secondary" : "btn-primary"}`}
         >
-          {isModelLoading && !isRecording ? "Loading Whisper..." : isRecording ? "Stop Recording" : "Start Recording"}
+          {isRecording ? "Stop Recording" : "Start Recording"}
         </button>
         <Timer isRunning={isRecording} />
         <label className="flex items-center">
           <input
             type="checkbox"
             checked={isAutoGPTEnabled}
-            onChange={e => setIsAutoGPTEnabled(e.target.checked)}
+            onChange={(e) => setIsAutoGPTEnabled(e.target.checked)}
             className="checkbox mr-1"
           />
           <span>Auto GPT</span>
         </label>
       </div>
-
       <div className="flex flex-1 space-x-2 overflow-hidden">
         <div className="flex-1 flex flex-col bg-base-200 p-2 rounded-lg">
           <textarea
             value={currentText}
-            onChange={e => setCurrentText(e.target.value)}
+            onChange={(e) => setCurrentText(e.target.value)}
             className="textarea textarea-bordered flex-1 mb-1 bg-base-100 min-h-[80px] whitespace-pre-wrap"
             placeholder="Transcribed text will appear here..."
           />
-          <button onClick={() => setCurrentText("")} className="btn btn-ghost mt-1">
+          <button
+            onClick={() => setCurrentText("")}
+            className="btn btn-ghost mt-1"
+          >
             Clear Content
           </button>
         </div>
-
         <div className="flex-1 flex flex-col bg-base-200 p-2 rounded-lg">
-          <div ref={aiResponseRef} className="flex-1 overflow-auto bg-base-100 p-2 rounded mb-1 min-h-[80px]">
+          <div 
+            ref={aiResponseRef}
+            className="flex-1 overflow-auto bg-base-100 p-2 rounded mb-1 min-h-[80px]"
+          >
             <h2 className="text-lg font-bold mb-1">AI Response:</h2>
-            <ReactMarkdown className="markdown-body whitespace-pre-wrap">
+            <ReactMarkdown className="whitespace-pre-wrap markdown-body" components={{
+              p: ({node, ...props}) => <p style={{whiteSpace: 'pre-wrap'}} {...props} />
+            }}>
               {displayedAiResult}
             </ReactMarkdown>
           </div>
           <div className="flex justify-between mt-1">
             <button
-              onClick={debounce(() => console.log("Ask GPT Triggered"), 300)}
+              onClick={debounce(() => handleAskGPT(), 300)}
               disabled={!currentText || isLoading}
               className="btn btn-primary"
             >
               {isLoading ? "Loading..." : "Ask GPT"}
             </button>
-            <button onClick={() => setDisplayedAiResult("")} className="btn btn-ghost">
+            <button onClick={() => {
+              setDisplayedAiResult("");
+            }} className="btn btn-ghost">
               Clear AI Result
             </button>
           </div>

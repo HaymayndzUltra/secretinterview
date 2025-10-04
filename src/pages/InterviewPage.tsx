@@ -84,32 +84,6 @@ const InterviewPage: React.FC = () => {
     lastProcessedIndexRef.current = lastProcessedIndex;
   }, [lastProcessedIndex]);
 
-  useEffect(() => {
-    const unsubscribeTranscript = window.electronAPI.onWhisperTranscript((payload) => {
-      handleStreamingTranscript(payload);
-    });
-
-    const unsubscribeStatus = window.electronAPI.onWhisperStatus((status) => {
-      if (status.state === "loading") {
-        setIsModelLoading(true);
-      } else if (status.state === "ready") {
-        setIsModelLoading(false);
-      } else if (status.state === "stopped" || status.state === "idle") {
-        setIsModelLoading(false);
-      } else if (status.state === "error") {
-        setIsModelLoading(false);
-        if (status.message) {
-          setError(status.message);
-        }
-      }
-    });
-
-    return () => {
-      unsubscribeTranscript?.();
-      unsubscribeStatus?.();
-    };
-  }, [handleStreamingTranscript, setError]);
-
   const handleAskGPT = async (newContent?: string) => {
     const contentToProcess = newContent || currentText.slice(lastProcessedIndex).trim();
     if (!contentToProcess) return;
@@ -151,6 +125,7 @@ const InterviewPage: React.FC = () => {
     handleAskGPT(newContent);
   }, [handleAskGPT]);
 
+  // Defined before the subscription effect to avoid temporal dead zone issues when referenced.
   const handleStreamingTranscript = useCallback((payload: { text: string; isFinal: boolean }) => {
     if (!payload) {
       return;
@@ -214,6 +189,32 @@ const InterviewPage: React.FC = () => {
       }
     }
   }, [autoSubmitTimer, handleAskGPTStable, isAutoGPTEnabled, setCurrentText]);
+
+  useEffect(() => {
+    const unsubscribeTranscript = window.electronAPI.onWhisperTranscript((payload) => {
+      handleStreamingTranscript(payload);
+    });
+
+    const unsubscribeStatus = window.electronAPI.onWhisperStatus((status) => {
+      if (status.state === "loading") {
+        setIsModelLoading(true);
+      } else if (status.state === "ready") {
+        setIsModelLoading(false);
+      } else if (status.state === "stopped" || status.state === "idle") {
+        setIsModelLoading(false);
+      } else if (status.state === "error") {
+        setIsModelLoading(false);
+        if (status.message) {
+          setError(status.message);
+        }
+      }
+    });
+
+    return () => {
+      unsubscribeTranscript?.();
+      unsubscribeStatus?.();
+    };
+  }, [handleStreamingTranscript, setError]);
 
   useEffect(() => {
     let checkTimer: NodeJS.Timeout | null = null;

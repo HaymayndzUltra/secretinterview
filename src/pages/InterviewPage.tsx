@@ -14,6 +14,80 @@ import { useError } from "../contexts/ErrorContext";
 import { useInterview } from "../contexts/InterviewContext";
 import ReactMarkdown from 'react-markdown';
 
+const RECORDER_WORKLET_NAME = 'interview-recorder';
+
+type RecorderWorkletMessage =
+  | { type: 'audio'; payload: ArrayBuffer }
+  | { type: 'flush-complete' };
+
+/**
+ * Generates an inline AudioWorklet module that mirrors the previous ScriptProcessor
+ * behaviour by batching samples into 4096 frame chunks before streaming them back
+ * to the main thread as 16-bit PCM. Keeping the worklet definition inline allows
+ * us to avoid touching the build pipeline while modernising the audio stack.
+ */
+const createRecorderWorkletModuleUrl = () => {
+  const workletCode = `
+    class InterviewRecorderProcessor extends AudioWorkletProcessor {
+      constructor(options) {
+        super();
+        const processorOptions = (options && options.processorOptions) || {};
+        const size = Number.isFinite(processorOptions.bufferSize) && processorOptions.bufferSize > 0
+          ? processorOptions.bufferSize
+          : 4096;
+        this._bufferSize = size;
+        this._buffer = new Int16Array(this._bufferSize);
+        this._writeIndex = 0;
+
+        this.port.onmessage = (event) => {
+          if (event && event.data && event.data.command === 'flush') {
+            this._flushPending();
+            this.port.postMessage({ type: 'flush-complete' });
+          }
+        };
+      }
+
+      _flushPending() {
+        if (!this._writeIndex) {
+          return;
+        }
+
+        const output = this._buffer.slice(0, this._writeIndex);
+        this._writeIndex = 0;
+        this.port.postMessage({ type: 'audio', payload: output.buffer }, [output.buffer]);
+      }
+
+      process(inputs) {
+        const input = inputs[0];
+        if (!input || input.length === 0) {
+          return true;
+        }
+
+        const channelData = input[0];
+        if (!channelData) {
+          return true;
+        }
+
+        for (let i = 0; i < channelData.length; i++) {
+          const sample = Math.max(-1, Math.min(1, channelData[i]));
+          this._buffer[this._writeIndex++] = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+
+          if (this._writeIndex >= this._bufferSize) {
+            this._flushPending();
+          }
+        }
+
+        return true;
+      }
+    }
+
+    registerProcessor('${RECORDER_WORKLET_NAME}', InterviewRecorderProcessor);
+  `;
+
+  const blob = new Blob([workletCode], { type: 'application/javascript' });
+  return URL.createObjectURL(blob);
+};
+
 const InterviewPage: React.FC = () => {
   const { knowledgeBase, conversations, addConversation, clearConversations } = useKnowledgeBase();
   const { error, setError, clearError } = useError();
@@ -31,11 +105,14 @@ const InterviewPage: React.FC = () => {
   const [isConfigured, setIsConfigured] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isAutoGPTEnabled, setIsAutoGPTEnabled] = useState(false);
-  const [userMedia, setUserMedia] = useState<MediaStream | null>(null);
-  const [audioContext, setAudioContext] = useState<AudioContext | null>(null);
-  const [processor, setProcessor] = useState<ScriptProcessorNode | null>(null);
   const [autoSubmitTimer, setAutoSubmitTimer] = useState<NodeJS.Timeout | null>(null);
   const aiResponseRef = useRef<HTMLDivElement>(null);
+  const userMediaRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const workletNodeRef = useRef<AudioWorkletNode | null>(null);
+  const workletModuleUrlRef = useRef<string | null>(null);
+  const flushResolverRef = useRef<(() => void) | null>(null);
+  const deepgramSessionActiveRef = useRef(false);
 
   const markdownStyles = `
     .markdown-body {
@@ -190,7 +267,7 @@ const InterviewPage: React.FC = () => {
           sampleRate: 16000,
         },
       });
-      setUserMedia(stream);
+      userMediaRef.current = stream;
 
       const config = await window.electronAPI.getConfig();
       const result = await window.electronAPI.ipcRenderer.invoke('start-deepgram', {
@@ -200,55 +277,160 @@ const InterviewPage: React.FC = () => {
         throw new Error(result.error);
       }
 
+      deepgramSessionActiveRef.current = true;
+
       const context = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-      setAudioContext(context);
+      if (!context.audioWorklet) {
+        throw new Error('AudioWorklet API is not supported in this environment.');
+      }
+
+      audioContextRef.current = context;
+      const workletModuleUrl = createRecorderWorkletModuleUrl();
+      workletModuleUrlRef.current = workletModuleUrl;
+      await context.audioWorklet.addModule(workletModuleUrl);
+
       const source = context.createMediaStreamSource(stream);
-      const processor = context.createScriptProcessor(4096, 1, 1);
-      setProcessor(processor);
+      // The AudioWorklet mirrors the previous ScriptProcessor pipeline but runs off the
+      // main thread for better stability and lower latency scheduling jitter.
+      const node = new AudioWorkletNode(context, RECORDER_WORKLET_NAME, {
+        numberOfInputs: 1,
+        numberOfOutputs: 1,
+        outputChannelCount: [1],
+        channelCount: 1,
+        channelCountMode: 'explicit',
+        channelInterpretation: 'speakers',
+        processorOptions: {
+          bufferSize: 4096,
+        },
+      });
 
-      source.connect(processor);
-      processor.connect(context.destination);
+      workletNodeRef.current = node;
 
-      processor.onaudioprocess = (e: { inputBuffer: { getChannelData: (arg0: number) => any; }; }) => {
-        const inputData = e.inputBuffer.getChannelData(0);
-        const audioData = new Int16Array(inputData.length);
-        for (let i = 0; i < inputData.length; i++) {
-          audioData[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
+      node.port.onmessage = (event: MessageEvent<RecorderWorkletMessage>) => {
+        const message = event.data;
+        if (!message) {
+          return;
         }
-        window.electronAPI.ipcRenderer.invoke('send-audio-to-deepgram', audioData.buffer);
+
+        if (message.type === 'audio' && message.payload) {
+          void window.electronAPI.ipcRenderer
+            .invoke('send-audio-to-deepgram', message.payload)
+            .catch((streamError: Error) => {
+              console.error('Failed to stream audio to Deepgram', streamError);
+            });
+        } else if (message.type === 'flush-complete') {
+          if (flushResolverRef.current) {
+            flushResolverRef.current();
+          }
+        }
       };
+
+      if (typeof node.port.start === 'function') {
+        node.port.start();
+      }
+
+      source.connect(node);
+      node.connect(context.destination);
+
+      await context.resume();
 
       setIsRecording(true);
     } catch (err: any) {
+      console.error('Failed to start recording', err);
+      await stopRecording();
+      deepgramSessionActiveRef.current = false;
       setError("Failed to start recording. Please check permissions or try again.");
     }
   };
 
-  const stopRecording = () => {
-    if (userMedia) {
-      userMedia.getTracks().forEach((track) => track.stop());
+  const stopRecording = useCallback(async () => {
+    try {
+      const node = workletNodeRef.current;
+      if (node) {
+        const flushPromise = new Promise<void>((resolve) => {
+          let timeoutId: ReturnType<typeof setTimeout> | undefined;
+          flushResolverRef.current = () => {
+            if (timeoutId) {
+              clearTimeout(timeoutId);
+            }
+            flushResolverRef.current = null;
+            resolve();
+          };
+
+          timeoutId = setTimeout(() => {
+            flushResolverRef.current = null;
+            resolve();
+          }, 250);
+
+          try {
+            node.port.postMessage({ command: 'flush' });
+          } catch (postError) {
+            console.error('Failed to request audio worklet flush', postError);
+            if (timeoutId) {
+              clearTimeout(timeoutId);
+            }
+            flushResolverRef.current = null;
+            resolve();
+          }
+        });
+
+        try {
+          await flushPromise;
+        } catch (flushError) {
+          console.error('Audio worklet flush failed', flushError);
+        }
+
+        node.port.onmessage = null;
+        try {
+          node.disconnect();
+        } catch (disconnectError) {
+          console.warn('Error disconnecting worklet node', disconnectError);
+        }
+        workletNodeRef.current = null;
+      }
+
+      const stream = userMediaRef.current;
+      if (stream) {
+        stream.getTracks().forEach((track) => track.stop());
+        userMediaRef.current = null;
+      }
+
+      const context = audioContextRef.current;
+      if (context) {
+        try {
+          if (context.state !== 'closed') {
+            await context.close();
+          }
+        } catch (closeError) {
+          console.error('Failed to close audio context', closeError);
+        }
+        audioContextRef.current = null;
+      }
+
+      if (workletModuleUrlRef.current) {
+        URL.revokeObjectURL(workletModuleUrlRef.current);
+        workletModuleUrlRef.current = null;
+      }
+    } finally {
+      flushResolverRef.current = null;
+      if (deepgramSessionActiveRef.current) {
+        try {
+          await window.electronAPI.ipcRenderer.invoke('stop-deepgram');
+        } catch (stopErr) {
+          console.error('Failed to stop Deepgram session', stopErr);
+        }
+        deepgramSessionActiveRef.current = false;
+      }
+      setIsRecording(false);
     }
-    if (audioContext) {
-      audioContext.close();
-    }
-    if (processor) {
-      processor.disconnect();
-    }
-    window.electronAPI.ipcRenderer.invoke('stop-deepgram');
-    setIsRecording(false);
-    setUserMedia(null);
-    setAudioContext(null);
-    setProcessor(null);
-  };
+  }, []);
 
   useEffect(() => {
     loadConfig();
     return () => {
-      if (isRecording) {
-        stopRecording();
-      }
+      stopRecording();
     };
-  }, []);
+  }, [stopRecording]);
 
   useEffect(() => {
     if (aiResponseRef.current) {

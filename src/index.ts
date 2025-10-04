@@ -174,7 +174,8 @@ ipcMain.handle("get-config", () => {
 });
 
 ipcMain.handle("set-config", (event, config) => {
-  store.set("config", config);
+  const existingConfig = store.get("config") || {};
+  store.set("config", { ...existingConfig, ...config });
 });
 
 ipcMain.handle("whisper:start", (event, options: WhisperStartOptions) => {
@@ -248,6 +249,7 @@ app.on("before-quit", () => {
     secondaryLanguage: config.secondaryLanguage || "",
     whisperBinaryPath: config.whisperBinaryPath || "",
     whisperModelPath: config.whisperModelPath || "",
+    useSystemAudio: Boolean(config.useSystemAudio),
   };
   store.clear();
   store.set("config", apiInfo);

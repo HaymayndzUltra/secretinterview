@@ -15,6 +15,7 @@ const Settings: React.FC = () => {
   const [secondaryLanguage, setSecondaryLanguage] = useState('');
   const [whisperBinaryPath, setWhisperBinaryPath] = useState('');
   const [whisperModelPath, setWhisperModelPath] = useState('');
+  const [useSystemAudio, setUseSystemAudio] = useState(false);
 
   useEffect(() => {
     loadConfig();
@@ -22,7 +23,7 @@ const Settings: React.FC = () => {
 
   const loadConfig = async () => {
     try {
-      const config = await window.electronAPI.getConfig();
+      const config = (await window.electronAPI.getConfig()) || {};
       setApiKey(config.openai_key || '');
       setApiModel(config.gpt_model || 'gpt-4o');
       setApiBase(config.api_base || '');
@@ -31,6 +32,7 @@ const Settings: React.FC = () => {
       setSecondaryLanguage(config.secondaryLanguage || '');
       setWhisperBinaryPath(config.whisperBinaryPath || '');
       setWhisperModelPath(config.whisperModelPath || '');
+      setUseSystemAudio(Boolean(config.useSystemAudio));
     } catch (err) {
       console.error('Failed to load configuration', err);
       setError('Failed to load configuration. Please check your settings.');
@@ -39,7 +41,9 @@ const Settings: React.FC = () => {
 
   const handleSave = async () => {
     try {
+      const existingConfig = (await window.electronAPI.getConfig()) || {};
       await window.electronAPI.setConfig({
+        ...existingConfig,
         openai_key: apiKey,
         gpt_model: apiModel,
         api_base: apiBase,
@@ -48,6 +52,7 @@ const Settings: React.FC = () => {
         secondaryLanguage: secondaryLanguage,
         whisperBinaryPath: whisperBinaryPath,
         whisperModelPath: whisperModelPath,
+        useSystemAudio,
       });
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 3000);
@@ -163,6 +168,23 @@ const Settings: React.FC = () => {
           className="input input-bordered w-full"
           placeholder="es"
         />
+      </div>
+      <div className="mb-4 flex items-center gap-3">
+        <input
+          id="use-system-audio"
+          type="checkbox"
+          className="checkbox"
+          checked={useSystemAudio}
+          onChange={(e) => setUseSystemAudio(e.target.checked)}
+        />
+        <div>
+          <label htmlFor="use-system-audio" className="label cursor-pointer">
+            <span className="label-text">Capture system audio</span>
+          </label>
+          <p className="text-sm text-base-content/70">
+            When enabled, the app records loopback audio from your system instead of the microphone.
+          </p>
+        </div>
       </div>
       <div className="mb-4">
         <h2 className="text-xl font-semibold mb-2">Local Whisper</h2>

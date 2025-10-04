@@ -17,6 +17,7 @@ import FormData from "form-data";
 import fs from "fs";
 import path from "path";
 import { Buffer } from "buffer";
+import { WhisperStreamBridge, WhisperStartOptions } from "./main/whisperBridge";
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
 import electronSquirrelStartup from "electron-squirrel-startup";
@@ -24,6 +25,8 @@ import electronSquirrelStartup from "electron-squirrel-startup";
 if (electronSquirrelStartup) {
   app.quit();
 }
+
+const whisperBridge = new WhisperStreamBridge();
 
 const createWindow = (): void => {
   const mainWindow = new BrowserWindow({
@@ -59,6 +62,8 @@ const createWindow = (): void => {
       }
     }
   );
+
+  whisperBridge.setWindow(mainWindow);
 
   mainWindow.loadURL(MAIN_WINDOW_WEBPACK_ENTRY + "#/main_window");
 //  mainWindow.webContents.openDevTools();
@@ -134,6 +139,7 @@ app.on("ready", createWindow);
 // dock icon is clicked and there are no other windows open.
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {
+    whisperBridge.stop();
     app.quit();
   }
 });
@@ -170,6 +176,30 @@ ipcMain.handle("get-config", () => {
 ipcMain.handle("set-config", (event, config) => {
   store.set("config", config);
 });
+
+ipcMain.handle("whisper:start", (event, options: WhisperStartOptions) => {
+  return whisperBridge.start(options);
+});
+
+ipcMain.handle("whisper:stop", () => {
+  whisperBridge.stop();
+});
+
+ipcMain.on(
+  "whisper:audio-chunk",
+  (event, chunk: ArrayBuffer | Buffer | Uint8Array | null | undefined) => {
+    if (!chunk) {
+      return;
+    }
+    if (Buffer.isBuffer(chunk)) {
+      whisperBridge.pushAudioChunk(chunk);
+    } else if (chunk instanceof Uint8Array) {
+      whisperBridge.pushAudioChunk(Buffer.from(chunk));
+    } else {
+      whisperBridge.pushAudioChunk(Buffer.from(chunk));
+    }
+  }
+);
 
 ipcMain.handle("parsePDF", async (event, pdfBuffer) => {
   try {
@@ -215,9 +245,13 @@ app.on("before-quit", () => {
     gpt_model: config.gpt_model || "",
     api_call_method: config.api_call_method || "direct",
     primaryLanguage: config.primaryLanguage || "en",
+    secondaryLanguage: config.secondaryLanguage || "",
+    whisperBinaryPath: config.whisperBinaryPath || "",
+    whisperModelPath: config.whisperModelPath || "",
   };
   store.clear();
   store.set("config", apiInfo);
+  whisperBridge.stop();
 });
 
 ipcMain.handle("get-system-audio-stream", async () => {

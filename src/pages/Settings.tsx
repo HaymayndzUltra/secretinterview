@@ -13,6 +13,8 @@ const Settings: React.FC = () => {
   const [testResult, setTestResult] = useState<string | null>(null);
   const [primaryLanguage, setPrimaryLanguage] = useState('auto');
   const [secondaryLanguage, setSecondaryLanguage] = useState('');
+  const [whisperBinaryPath, setWhisperBinaryPath] = useState('');
+  const [whisperModelPath, setWhisperModelPath] = useState('');
 
   useEffect(() => {
     loadConfig();
@@ -27,6 +29,8 @@ const Settings: React.FC = () => {
       setApiCallMethod(config.api_call_method || 'direct');
       setPrimaryLanguage(config.primaryLanguage || 'auto');
       setSecondaryLanguage(config.secondaryLanguage || '');
+      setWhisperBinaryPath(config.whisperBinaryPath || '');
+      setWhisperModelPath(config.whisperModelPath || '');
     } catch (err) {
       console.error('Failed to load configuration', err);
       setError('Failed to load configuration. Please check your settings.');
@@ -41,6 +45,9 @@ const Settings: React.FC = () => {
         api_base: apiBase,
         api_call_method: apiCallMethod,
         primaryLanguage: primaryLanguage,
+        secondaryLanguage: secondaryLanguage,
+        whisperBinaryPath: whisperBinaryPath,
+        whisperModelPath: whisperModelPath,
       });
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 3000);
@@ -146,6 +153,45 @@ const Settings: React.FC = () => {
             </option>
           ))}
         </select>
+      </div>
+      <div className="mb-4">
+        <label className="label">Secondary Language (Optional)</label>
+        <input
+          type="text"
+          value={secondaryLanguage}
+          onChange={(e) => setSecondaryLanguage(e.target.value)}
+          className="input input-bordered w-full"
+          placeholder="es"
+        />
+      </div>
+      <div className="mb-4">
+        <h2 className="text-xl font-semibold mb-2">Local Whisper</h2>
+        <label className="label">Whisper Binary Path</label>
+        <input
+          type="text"
+          value={whisperBinaryPath}
+          onChange={(e) => setWhisperBinaryPath(e.target.value)}
+          className="input input-bordered w-full"
+          placeholder="/path/to/whisper-stream"
+        />
+        <label className="label">
+          <span className="label-text-alt">
+            Leave blank to use the bundled whisper-stream binary in the app resources directory.
+          </span>
+        </label>
+        <label className="label">Whisper Model Path</label>
+        <input
+          type="text"
+          value={whisperModelPath}
+          onChange={(e) => setWhisperModelPath(e.target.value)}
+          className="input input-bordered w-full"
+          placeholder="/path/to/ggml-base.en.bin"
+        />
+        <label className="label">
+          <span className="label-text-alt">
+            Models should be ggml/gguf whisper checkpoints compatible with whisper.cpp.
+          </span>
+        </label>
       </div>
       <div className="flex justify-between mt-4">
         <button onClick={handleSave} className="btn btn-primary">

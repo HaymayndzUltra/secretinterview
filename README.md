@@ -53,7 +53,8 @@ Interview Assistant 相比其他面试辅助工具有以下优势：
 要使用 Interview Assistant，您需要：
 
 1. OpenAI API 密钥: 可以从 https://platform.openai.com 获取，或者可以购买第三方带有转发地址的API也同样支持，记得选择转发的复选框，配置完成后可以点击测试按钮进行测试。
-2. （可选）首次运行本地 Whisper 模型时需要网络连接以下载模型文件，之后即可离线使用。
+2. Whisper.cpp 运行时：在项目根目录创建 `whisper` 文件夹（仓库已提供空目录），放置编译好的 `whisper-stream` 可执行文件以及 `models/ggml-base.en.bin`（或您喜欢的 ggml/gguf Whisper 模型）。推荐使用 whisper.cpp 仓库中的 `examples/stream` 示例（编译时启用 `--output-json-stream`），它会持续输出实时转写结果。程序会以 16kHz、16-bit PCM 的形式通过 STDIN 推送音频数据，请确保二进制支持该输入模式。打包后应用会在 `resources/whisper` 下寻找相同结构。也可以在设置页面自定义二进制和模型路径。
+3. （首次运行）如需下载新的模型文件，请确保有网络连接，下载完成后即可完全离线使用。
 
 ![image-20240919163506505](https://cdn.jsdelivr.net/gh/filifili233/blogimg@master/uPic/image-20240919163506505.png)
 
@@ -123,7 +124,8 @@ This comparison table clearly shows the advantages of Interview Assistant compar
 To use Interview Assistant, you need:
 
 1. OpenAI API key: Can be obtained from https://platform.openai.com, or you can purchase a third-party API with a forwarding address which is also supported. Remember to select the forwarding checkbox, and you can click the test button to test after configuration.
-2. (Optional) The first run of the local Whisper model requires an internet connection to download model files. Afterwards it can be used offline.
+2. Whisper.cpp runtime: Place a compiled `whisper-stream` binary together with a `models/ggml-base.en.bin` (or another ggml/gguf Whisper checkpoint) inside the provided `whisper` directory at the project root. The recommended binary is built from the `examples/stream` target in whisper.cpp with JSON streaming enabled (`--output-json-stream`) so the app can consume incremental transcripts. The Electron bridge streams 16 kHz, 16-bit PCM audio through STDIN, so make sure the binary accepts that input mode. When packaged the app looks in `resources/whisper` for the same layout. You can override both paths from the Settings screen if you keep models elsewhere.
+3. (First run only) If you need to download a new model file, ensure the machine is online. After the files are cached you can run completely offline.
 
 ![image-20240919163506505](https://cdn.jsdelivr.net/gh/filifili233/blogimg@master/uPic/image-20240919163506505.png)
 

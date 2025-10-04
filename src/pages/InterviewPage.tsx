@@ -35,16 +35,14 @@ const InterviewPage: React.FC = () => {
   const [audioContext, setAudioContext] = useState<AudioContext | null>(null);
   const [processor, setProcessor] = useState<ScriptProcessorNode | null>(null);
   const [autoSubmitTimer, setAutoSubmitTimer] = useState<NodeJS.Timeout | null>(null);
-  const [isModelLoading, setIsModelLoading] = useState(true);
+  const [isModelLoading, setIsModelLoading] = useState(false);
   const aiResponseRef = useRef<HTMLDivElement>(null);
-  const whisperPipelineRef = useRef<any>(null);
-  const audioQueueRef = useRef<Float32Array[]>([]);
-  const queueSampleCountRef = useRef(0);
-  const isProcessingRef = useRef(false);
+  const pendingPartialRef = useRef<string>("");
   const lastTranscriptTimeRef = useRef(Date.now());
   const lastProcessedIndexRef = useRef(lastProcessedIndex);
+  const configRef = useRef<any>(null);
 
-  const MIN_SAMPLES_PER_TRANSCRIPT = 16000 * 2;
+  const SAMPLE_RATE = 16000;
 
   const markdownStyles = `
     .markdown-body {
@@ -87,41 +85,30 @@ const InterviewPage: React.FC = () => {
   }, [lastProcessedIndex]);
 
   useEffect(() => {
-    let isMounted = true;
+    const unsubscribeTranscript = window.electronAPI.onWhisperTranscript((payload) => {
+      handleStreamingTranscript(payload);
+    });
 
-    const loadWhisperModel = async () => {
-      try {
-        const { pipeline, env } = await import("@xenova/transformers");
-        env.allowLocalModels = true;
-        env.useBrowserCache = true;
-        const transcriber = await pipeline(
-          "automatic-speech-recognition",
-          "Xenova/whisper-small.en",
-          {
-            quantized: true,
-          }
-        );
-        if (isMounted) {
-          whisperPipelineRef.current = transcriber;
-          setIsModelLoading(false);
-        }
-      } catch (err: any) {
-        console.error("Failed to load Whisper model", err);
-        if (isMounted) {
-          setIsModelLoading(false);
-          setError(
-            "Failed to load Whisper model. Please check your internet connection for the initial download and restart the app."
-          );
+    const unsubscribeStatus = window.electronAPI.onWhisperStatus((status) => {
+      if (status.state === "loading") {
+        setIsModelLoading(true);
+      } else if (status.state === "ready") {
+        setIsModelLoading(false);
+      } else if (status.state === "stopped" || status.state === "idle") {
+        setIsModelLoading(false);
+      } else if (status.state === "error") {
+        setIsModelLoading(false);
+        if (status.message) {
+          setError(status.message);
         }
       }
-    };
-
-    loadWhisperModel();
+    });
 
     return () => {
-      isMounted = false;
+      unsubscribeTranscript?.();
+      unsubscribeStatus?.();
     };
-  }, [setError]);
+  }, [handleStreamingTranscript, setError]);
 
   const handleAskGPT = async (newContent?: string) => {
     const contentToProcess = newContent || currentText.slice(lastProcessedIndex).trim();
@@ -164,99 +151,69 @@ const InterviewPage: React.FC = () => {
     handleAskGPT(newContent);
   }, [handleAskGPT]);
 
-  const handleTranscript = useCallback((transcript: string) => {
-    const trimmedTranscript = transcript.trim();
-    if (!trimmedTranscript) {
+  const handleStreamingTranscript = useCallback((payload: { text: string; isFinal: boolean }) => {
+    if (!payload) {
       return;
     }
 
-    lastTranscriptTimeRef.current = Date.now();
+    const trimmed = (payload.text || "").trim();
+    let finalSnapshot: string | null = null;
 
     setCurrentText((prev: string) => {
-      if (!prev.endsWith(trimmedTranscript)) {
-        const updatedText = prev + (prev ? '\n' : '') + trimmedTranscript;
+      let base = prev;
+      const activePartial = pendingPartialRef.current;
+      if (activePartial && prev.endsWith(activePartial)) {
+        base = prev.slice(0, -activePartial.length);
+      }
 
-        if (isAutoGPTEnabled) {
-          if (autoSubmitTimer) {
-            clearTimeout(autoSubmitTimer);
-          }
-          const newTimer = setTimeout(() => {
-            const newContent = updatedText.slice(lastProcessedIndexRef.current);
-            if (newContent.trim()) {
-              handleAskGPTStable(newContent);
-            }
-          }, 2000);
-          setAutoSubmitTimer(newTimer);
+      if (!trimmed) {
+        if (payload.isFinal) {
+          pendingPartialRef.current = "";
+          finalSnapshot = base;
+        } else {
+          pendingPartialRef.current = "";
         }
-
-        return updatedText;
+        return base;
       }
-      return prev;
+
+      let next = base + trimmed;
+      if (payload.isFinal) {
+        pendingPartialRef.current = "";
+        if (!next.endsWith("\n")) {
+          next += "\n";
+        }
+        finalSnapshot = next;
+      } else {
+        pendingPartialRef.current = trimmed;
+      }
+
+      return next;
     });
+
+    if (trimmed) {
+      lastTranscriptTimeRef.current = Date.now();
+    }
+
+    if (payload.isFinal) {
+      const snapshot = (finalSnapshot ?? "").trimEnd();
+      if (!snapshot) {
+        return;
+      }
+
+      if (isAutoGPTEnabled) {
+        if (autoSubmitTimer) {
+          clearTimeout(autoSubmitTimer);
+        }
+        const newTimer = setTimeout(() => {
+          const newContent = snapshot.slice(lastProcessedIndexRef.current);
+          if (newContent.trim()) {
+            handleAskGPTStable(newContent);
+          }
+        }, 2000);
+        setAutoSubmitTimer(newTimer);
+      }
+    }
   }, [autoSubmitTimer, handleAskGPTStable, isAutoGPTEnabled, setCurrentText]);
-
-  const processAudioQueue = useCallback(async () => {
-    if (isProcessingRef.current || !whisperPipelineRef.current) {
-      return;
-    }
-
-    if (queueSampleCountRef.current < MIN_SAMPLES_PER_TRANSCRIPT) {
-      return;
-    }
-
-    isProcessingRef.current = true;
-
-    const samplesToProcess = Math.min(queueSampleCountRef.current, MIN_SAMPLES_PER_TRANSCRIPT);
-    const combined = new Float32Array(samplesToProcess);
-    let processedSamples = 0;
-    const newQueue: Float32Array[] = [];
-
-    for (const chunk of audioQueueRef.current) {
-      if (processedSamples >= samplesToProcess) {
-        newQueue.push(chunk);
-        continue;
-      }
-
-      const remaining = samplesToProcess - processedSamples;
-      const takeCount = Math.min(chunk.length, remaining);
-      combined.set(chunk.subarray(0, takeCount), processedSamples);
-      processedSamples += takeCount;
-
-      if (takeCount < chunk.length) {
-        newQueue.push(chunk.subarray(takeCount));
-      }
-    }
-
-    audioQueueRef.current = newQueue;
-    queueSampleCountRef.current = newQueue.reduce((sum, chunk) => sum + chunk.length, 0);
-
-    try {
-      const result = await whisperPipelineRef.current({
-        array: combined,
-        sampling_rate: 16000,
-      });
-
-      if (result?.text) {
-        handleTranscript(result.text);
-      }
-    } catch (err) {
-      console.error("Failed to transcribe audio chunk", err);
-      setError("Failed to process audio locally. Please try again.");
-    } finally {
-      isProcessingRef.current = false;
-      if (queueSampleCountRef.current >= MIN_SAMPLES_PER_TRANSCRIPT) {
-        setTimeout(() => {
-          processAudioQueue();
-        }, 0);
-      }
-    }
-  }, [handleTranscript, setError]);
-
-  const enqueueAudioChunk = useCallback((chunk: Float32Array) => {
-    audioQueueRef.current.push(chunk);
-    queueSampleCountRef.current += chunk.length;
-    processAudioQueue();
-  }, [processAudioQueue]);
 
   useEffect(() => {
     let checkTimer: NodeJS.Timeout | null = null;
@@ -290,6 +247,7 @@ const InterviewPage: React.FC = () => {
   const loadConfig = async () => {
     try {
       const config = await window.electronAPI.getConfig();
+      configRef.current = config;
       if (config && config.openai_key) {
         setIsConfigured(true);
       } else {
@@ -303,64 +261,88 @@ const InterviewPage: React.FC = () => {
   };
 
   const startRecording = async () => {
-    if (!whisperPipelineRef.current) {
-      setError("Whisper model is still loading. Please wait a moment and try again.");
+    if (isRecording || isModelLoading) {
       return;
     }
 
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: false,
+      const existingConfig = configRef.current || await window.electronAPI.getConfig();
+      configRef.current = existingConfig;
+
+      setIsModelLoading(true);
+
+      const whisperOptions = {
+        language: existingConfig?.primaryLanguage,
+        modelPath: existingConfig?.whisperModelPath,
+        binaryPath: existingConfig?.whisperBinaryPath,
+        sampleRate: SAMPLE_RATE,
+      };
+
+      const status = await window.electronAPI.startWhisperStream(whisperOptions);
+      if (status?.state === "error") {
+        setIsModelLoading(false);
+        setError(status.message || "Failed to start Whisper engine. Please verify your configuration.");
+        return;
+      }
+
+      if (status?.state === "ready") {
+        setIsModelLoading(false);
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
+          channelCount: 1,
           echoCancellation: true,
           noiseSuppression: true,
-          sampleRate: 16000,
+          sampleRate: SAMPLE_RATE,
         },
+        video: false,
       });
       setUserMedia(stream);
 
-      audioQueueRef.current = [];
-      queueSampleCountRef.current = 0;
-      isProcessingRef.current = false;
+      pendingPartialRef.current = "";
       lastTranscriptTimeRef.current = Date.now();
 
-      const context = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+      const context = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
       setAudioContext(context);
       const source = context.createMediaStreamSource(stream);
-      const processor = context.createScriptProcessor(4096, 1, 1);
-      setProcessor(processor);
+      const processorNode = context.createScriptProcessor(4096, 1, 1);
+      setProcessor(processorNode);
 
-      source.connect(processor);
-      processor.connect(context.destination);
+      source.connect(processorNode);
+      processorNode.connect(context.destination);
 
-      processor.onaudioprocess = (e: { inputBuffer: { getChannelData: (arg0: number) => Float32Array; }; }) => {
+      processorNode.onaudioprocess = (e: { inputBuffer: { getChannelData: (index: number) => Float32Array } }) => {
         const inputData = e.inputBuffer.getChannelData(0);
         const audioData = new Int16Array(inputData.length);
-        const floatChunk = new Float32Array(inputData.length);
 
         for (let i = 0; i < inputData.length; i++) {
           const sample = Math.max(-1, Math.min(1, inputData[i]));
-          const intSample = sample < 0 ? Math.round(sample * 0x8000) : Math.round(sample * 0x7FFF);
-          audioData[i] = intSample;
-          floatChunk[i] = intSample / 0x8000;
+          audioData[i] = sample < 0 ? Math.round(sample * 0x8000) : Math.round(sample * 0x7FFF);
         }
 
-        enqueueAudioChunk(floatChunk);
+        window.electronAPI.sendWhisperAudioChunk(audioData.buffer);
       };
 
       setIsRecording(true);
     } catch (err: any) {
       console.error("Failed to start recording", err);
-      setError("Failed to start recording. Please check permissions or try again.");
+      setError("Failed to start recording. Please check microphone permissions or try again.");
+      setIsModelLoading(false);
+      await window.electronAPI.stopWhisperStream();
     }
   };
 
-  const stopRecording = () => {
+  const stopRecording = useCallback(async () => {
     if (userMedia) {
       userMedia.getTracks().forEach((track) => track.stop());
     }
     if (audioContext) {
-      audioContext.close();
+      try {
+        await audioContext.close();
+      } catch (err) {
+        console.warn("Failed to close audio context", err);
+      }
     }
     if (processor) {
       processor.disconnect();
@@ -370,24 +352,31 @@ const InterviewPage: React.FC = () => {
       clearTimeout(autoSubmitTimer);
       setAutoSubmitTimer(null);
     }
-    audioQueueRef.current = [];
-    queueSampleCountRef.current = 0;
-    isProcessingRef.current = false;
+
+    pendingPartialRef.current = "";
     lastTranscriptTimeRef.current = Date.now();
     setIsRecording(false);
     setUserMedia(null);
     setAudioContext(null);
     setProcessor(null);
-  };
+    setIsModelLoading(false);
+
+    try {
+      await window.electronAPI.stopWhisperStream();
+    } catch (err) {
+      console.warn("Failed to stop Whisper stream", err);
+    }
+  }, [audioContext, autoSubmitTimer, processor, userMedia]);
 
   useEffect(() => {
     loadConfig();
-    return () => {
-      if (isRecording) {
-        stopRecording();
-      }
-    };
   }, []);
+
+  useEffect(() => {
+    return () => {
+      stopRecording();
+    };
+  }, [stopRecording]);
 
   useEffect(() => {
     if (aiResponseRef.current) {
@@ -410,7 +399,7 @@ const InterviewPage: React.FC = () => {
       <div className="flex justify-center items-center space-x-2">
           <button
             onClick={isRecording ? stopRecording : startRecording}
-            disabled={!isConfigured || isModelLoading}
+            disabled={!isConfigured || (isModelLoading && !isRecording)}
             className={`btn ${isRecording ? "btn-secondary" : "btn-primary"}`}
           >
             {isModelLoading && !isRecording

@@ -41,6 +41,8 @@ const InterviewPage: React.FC = () => {
   const lastTranscriptTimeRef = useRef(Date.now());
   const lastProcessedIndexRef = useRef(lastProcessedIndex);
   const configRef = useRef<any>(null);
+  const captureTracksRef = useRef<MediaStreamTrack[]>([]);
+  const captureEndHandlerRef = useRef<((event: Event) => void) | null>(null);
 
   const SAMPLE_RATE = 16000;
 
@@ -84,32 +86,6 @@ const InterviewPage: React.FC = () => {
     lastProcessedIndexRef.current = lastProcessedIndex;
   }, [lastProcessedIndex]);
 
-  useEffect(() => {
-    const unsubscribeTranscript = window.electronAPI.onWhisperTranscript((payload) => {
-      handleStreamingTranscript(payload);
-    });
-
-    const unsubscribeStatus = window.electronAPI.onWhisperStatus((status) => {
-      if (status.state === "loading") {
-        setIsModelLoading(true);
-      } else if (status.state === "ready") {
-        setIsModelLoading(false);
-      } else if (status.state === "stopped" || status.state === "idle") {
-        setIsModelLoading(false);
-      } else if (status.state === "error") {
-        setIsModelLoading(false);
-        if (status.message) {
-          setError(status.message);
-        }
-      }
-    });
-
-    return () => {
-      unsubscribeTranscript?.();
-      unsubscribeStatus?.();
-    };
-  }, [handleStreamingTranscript, setError]);
-
   const handleAskGPT = async (newContent?: string) => {
     const contentToProcess = newContent || currentText.slice(lastProcessedIndex).trim();
     if (!contentToProcess) return;
@@ -151,6 +127,18 @@ const InterviewPage: React.FC = () => {
     handleAskGPT(newContent);
   }, [handleAskGPT]);
 
+  const detachCaptureEndListener = useCallback(() => {
+    const handler = captureEndHandlerRef.current;
+    if (handler) {
+      captureTracksRef.current.forEach((track) => {
+        track.removeEventListener("ended", handler);
+      });
+    }
+    captureTracksRef.current = [];
+    captureEndHandlerRef.current = null;
+  }, []);
+
+  // Defined before the subscription effect to avoid temporal dead zone issues when referenced.
   const handleStreamingTranscript = useCallback((payload: { text: string; isFinal: boolean }) => {
     if (!payload) {
       return;
@@ -216,6 +204,32 @@ const InterviewPage: React.FC = () => {
   }, [autoSubmitTimer, handleAskGPTStable, isAutoGPTEnabled, setCurrentText]);
 
   useEffect(() => {
+    const unsubscribeTranscript = window.electronAPI.onWhisperTranscript((payload) => {
+      handleStreamingTranscript(payload);
+    });
+
+    const unsubscribeStatus = window.electronAPI.onWhisperStatus((status) => {
+      if (status.state === "loading") {
+        setIsModelLoading(true);
+      } else if (status.state === "ready") {
+        setIsModelLoading(false);
+      } else if (status.state === "stopped" || status.state === "idle") {
+        setIsModelLoading(false);
+      } else if (status.state === "error") {
+        setIsModelLoading(false);
+        if (status.message) {
+          setError(status.message);
+        }
+      }
+    });
+
+    return () => {
+      unsubscribeTranscript?.();
+      unsubscribeStatus?.();
+    };
+  }, [handleStreamingTranscript, setError]);
+
+  useEffect(() => {
     let checkTimer: NodeJS.Timeout | null = null;
 
     const checkAndSubmit = () => {
@@ -260,6 +274,132 @@ const InterviewPage: React.FC = () => {
     }
   };
 
+  const buildMediaError = useCallback((err: unknown, { source = "system" }: { source?: "system" | "microphone" } = {}): Error => {
+    const noun = source === "system" ? "system audio" : "microphone";
+    const allowInstruction = source === "system"
+      ? "Please allow screen recording with audio and enable the 'Share audio' option for the selected tab or window."
+      : "Please allow microphone permissions and try again.";
+    const unavailableInstruction = source === "system"
+      ? "Ensure the chosen screen, window, or tab supports audio sharing (for example, a Chrome tab with 'Share audio' enabled)."
+      : "Please connect a microphone or check your audio device settings.";
+
+    if (err instanceof DOMException) {
+      let message: string;
+      switch (err.name) {
+        case "NotFoundError":
+        case "DevicesNotFoundError":
+          message = `No ${noun} source was detected. ${unavailableInstruction}`;
+          break;
+        case "NotAllowedError":
+        case "SecurityError":
+          message = `${noun.charAt(0).toUpperCase()}${noun.slice(1)} capture was blocked. ${allowInstruction}`;
+          break;
+        case "NotReadableError":
+        case "AbortError":
+          message = `The ${noun} source is currently unavailable. Close any other applications using it and try again.`;
+          break;
+        case "OverconstrainedError":
+        case "ConstraintNotSatisfiedError":
+          message = source === "system"
+            ? "The browser could not capture system audio with the requested constraints. Try sharing a different tab or window and ensure audio sharing is enabled."
+            : "The current microphone configuration is not supported. Please adjust your audio settings and try again.";
+          break;
+        case "InvalidStateError":
+          message = source === "system"
+            ? "Screen or tab capture is already active. Stop the existing capture and try again."
+            : err.message || `Failed to access the ${noun}. Please try again.`;
+          break;
+        default:
+          message = err.message || `Failed to access the ${noun}. Please try again.`;
+      }
+      return new Error(message);
+    }
+
+    if (err instanceof Error) {
+      return err;
+    }
+
+    return new Error(`Failed to access the ${noun}. Please try again.`);
+  }, []);
+
+  const requestSystemAudioStream = useCallback(async (): Promise<MediaStream> => {
+    const mediaDevices = navigator.mediaDevices as (MediaDevices & {
+      getDisplayMedia?: (constraints?: DisplayMediaStreamConstraints) => Promise<MediaStream>;
+    }) | undefined;
+
+    if (!mediaDevices || typeof mediaDevices.getDisplayMedia !== "function") {
+      throw new Error("System audio capture is not supported in this browser. Please use a Chromium-based browser such as Chrome or Edge.");
+    }
+
+    const audioConstraints: MediaTrackConstraints = {
+      channelCount: 2,
+      sampleRate: SAMPLE_RATE,
+      echoCancellation: false,
+      noiseSuppression: false,
+    };
+
+    const displayConstraints: DisplayMediaStreamConstraints = {
+      audio: audioConstraints,
+      video: { frameRate: 1 },
+    };
+
+    let displayStream: MediaStream;
+    try {
+      displayStream = await mediaDevices.getDisplayMedia(displayConstraints);
+    } catch (err) {
+      throw buildMediaError(err, { source: "system" });
+    }
+
+    const audioTracks = displayStream.getAudioTracks();
+    if (!audioTracks.length) {
+      displayStream.getTracks().forEach((track) => track.stop());
+      throw new Error("No system audio was captured. When sharing your screen, window, or tab, enable the 'Share audio' option for the conferencing application.");
+    }
+
+    displayStream.getVideoTracks().forEach((track) => {
+      track.enabled = false;
+    });
+
+    return displayStream;
+  }, [SAMPLE_RATE, buildMediaError]);
+
+  const stopRecording = useCallback(async () => {
+    detachCaptureEndListener();
+
+    if (userMedia) {
+      userMedia.getTracks().forEach((track) => track.stop());
+    }
+    if (audioContext) {
+      try {
+        await audioContext.close();
+      } catch (err) {
+        console.warn("Failed to close audio context", err);
+      }
+    }
+    if (processor) {
+      processor.disconnect();
+      processor.onaudioprocess = null;
+    }
+    if (autoSubmitTimer) {
+      clearTimeout(autoSubmitTimer);
+      setAutoSubmitTimer(null);
+    }
+
+    pendingPartialRef.current = "";
+    lastTranscriptTimeRef.current = Date.now();
+    setIsRecording(false);
+    setUserMedia(null);
+    setAudioContext(null);
+    setProcessor(null);
+    setIsModelLoading(false);
+
+    try {
+      await window.electronAPI.stopWhisperStream();
+    } catch (err) {
+      console.warn("Failed to stop Whisper stream", err);
+    }
+  }, [audioContext, autoSubmitTimer, detachCaptureEndListener, processor, userMedia]);
+
   const startRecording = useCallback(async () => {
     if (isRecording || isModelLoading) {
       return;
@@ -283,27 +423,24 @@ const InterviewPage: React.FC = () => {
         sampleRate: SAMPLE_RATE,
       };
 
-      const status = await window.electronAPI.startWhisperStream(whisperOptions);
-      whisperStarted = Boolean(status) && status.state !== "error";
-
-      if (status?.state === "error") {
-        throw new Error(status.message || "Failed to start Whisper engine. Please verify your configuration.");
-      }
-
-      if (status?.state === "ready") {
-        setIsModelLoading(false);
-      }
-
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          sampleRate: SAMPLE_RATE,
-        },
-        video: false,
-      });
+      stream = await requestSystemAudioStream();
       setUserMedia(stream);
+
+      const handleCaptureEnded = (event: Event) => {
+        console.info("System audio capture ended", event);
+        setError("System audio capture ended or was revoked. Click Start Recording to resume.");
+        stopRecording();
+      };
+
+      captureTracksRef.current = stream.getTracks();
+      captureEndHandlerRef.current = handleCaptureEnded;
+      captureTracksRef.current.forEach((track) => {
+        track.addEventListener("ended", handleCaptureEnded);
+      });
+
+      if (!stream.active || stream.getAudioTracks().some((track) => track.readyState === "ended")) {
+        throw new DOMException("System audio capture ended before initialization could complete.", "AbortError");
+      }
 
       pendingPartialRef.current = "";
       lastTranscriptTimeRef.current = Date.now();
@@ -330,11 +467,23 @@ const InterviewPage: React.FC = () => {
       };
 
       setIsRecording(true);
+
+      const status = await window.electronAPI.startWhisperStream(whisperOptions);
+      whisperStarted = Boolean(status) && status.state !== "error";
+
+      if (status?.state === "error") {
+        throw new Error(status.message || "Failed to start Whisper engine. Please verify your configuration.");
+      }
+
+      if (status?.state === "ready") {
+        setIsModelLoading(false);
+      }
     } catch (err: any) {
       console.error("Failed to start recording", err);
-      const fallbackMessage = "Failed to start recording. Please check microphone permissions or try again.";
-      const errorMessage = err instanceof Error && err.message ? err.message : fallbackMessage;
-      setError(errorMessage);
+      const formattedError = buildMediaError(err, { source: "system" });
+      setError(formattedError.message);
+
+      detachCaptureEndListener();
 
       if (stream) {
         stream.getTracks().forEach((track) => track.stop());
@@ -369,46 +518,15 @@ const InterviewPage: React.FC = () => {
       }
       setIsModelLoading(false);
     }
-  }, [SAMPLE_RATE, isModelLoading, isRecording, setError]);
-
-  const stopRecording = useCallback(async () => {
-    if (userMedia) {
-      userMedia.getTracks().forEach((track) => track.stop());
-    }
-    if (audioContext) {
-      try {
-        await audioContext.close();
-      } catch (err) {
-        console.warn("Failed to close audio context", err);
-      }
-    }
-    if (processor) {
-      processor.disconnect();
-      processor.onaudioprocess = null;
-    }
-    if (autoSubmitTimer) {
-      clearTimeout(autoSubmitTimer);
-      setAutoSubmitTimer(null);
-    }
-
-    pendingPartialRef.current = "";
-    lastTranscriptTimeRef.current = Date.now();
-    setIsRecording(false);
-    setUserMedia(null);
-    setAudioContext(null);
-    setProcessor(null);
-    setIsModelLoading(false);
-
-    try {
-      await window.electronAPI.stopWhisperStream();
-    } catch (err) {
-      console.warn("Failed to stop Whisper stream", err);
-    }
-  }, [audioContext, autoSubmitTimer, processor, userMedia]);
-
-  useEffect(() => {
-    loadConfig();
-  }, []);
+  }, [
+    buildMediaError,
+    detachCaptureEndListener,
+    isModelLoading,
+    isRecording,
+    requestSystemAudioStream,
+    setError,
+    stopRecording
+  ]);
 
   useEffect(() => {
     return () => {

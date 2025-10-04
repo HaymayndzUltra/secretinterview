@@ -17,7 +17,6 @@ import FormData from "form-data";
 import fs from "fs";
 import path from "path";
 import { Buffer } from "buffer";
-import { createClient, LiveTranscriptionEvents } from "@deepgram/sdk";
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
 import electronSquirrelStartup from "electron-squirrel-startup";
@@ -216,7 +215,6 @@ app.on("before-quit", () => {
     gpt_model: config.gpt_model || "",
     api_call_method: config.api_call_method || "direct",
     primaryLanguage: config.primaryLanguage || "en",
-    deepgram_api_key: config.deepgram_api_key || "",
   };
   store.clear();
   store.set("config", apiInfo);
@@ -481,87 +479,3 @@ function normalizeApiBaseUrl(url: string): string {
   }
   return url;
 }
-
-let deepgramConnection: any = null;
-
-ipcMain.handle("start-deepgram", async (event, config) => {
-  try {
-    if (!config.deepgram_key) {
-      throw new Error("Deepgram API key lose");
-    }
-    const deepgram = createClient(config.deepgram_key);
-    deepgramConnection = deepgram.listen.live({
-      punctuate: true,
-      interim_results: false,
-      model: "general",
-      language: config.primaryLanguage || "en",
-      encoding: "linear16",
-      sample_rate: 16000,
-      endpointing: 1500,
-    });
-
-    deepgramConnection.addListener(LiveTranscriptionEvents.Open, () => {
-      event.sender.send("deepgram-status", { status: "open" });
-    });
-
-    deepgramConnection.addListener(LiveTranscriptionEvents.Close, () => {
-      event.sender.send("deepgram-status", { status: "closed" });
-    });
-
-    deepgramConnection.addListener(
-      LiveTranscriptionEvents.Transcript,
-      (data: any) => {
-        if (
-          data &&
-          data.is_final &&
-          data.channel &&
-          data.channel.alternatives &&
-          data.channel.alternatives[0]
-        ) {
-          const transcript = data.channel.alternatives[0].transcript;
-          if (transcript) {
-            event.sender.send("deepgram-transcript", {
-              transcript,
-              is_final: true,
-            });
-          }
-        }
-      }
-    );
-
-    deepgramConnection.addListener(
-      LiveTranscriptionEvents.Error,
-      (err: any) => {
-        event.sender.send("deepgram-error", err);
-      }
-    );
-
-    await new Promise((resolve, reject) => {
-      deepgramConnection.addListener(LiveTranscriptionEvents.Open, resolve);
-      deepgramConnection.addListener(LiveTranscriptionEvents.Error, reject);
-      setTimeout(() => reject(new Error("Deepgram timeout")), 10000);
-    });
-
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle("send-audio-to-deepgram", async (event, audioData) => {
-  if (deepgramConnection) {
-    try {
-      const buffer = Buffer.from(audioData);
-      deepgramConnection.send(buffer);
-    } catch (error) {
-      console.error("failed send data to Deepgram :", error);
-    }
-  }
-});
-
-ipcMain.handle("stop-deepgram", () => {
-  if (deepgramConnection) {
-    deepgramConnection.finish();
-    deepgramConnection = null;
-  }
-});

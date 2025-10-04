@@ -13,7 +13,6 @@ const Settings: React.FC = () => {
   const [testResult, setTestResult] = useState<string | null>(null);
   const [primaryLanguage, setPrimaryLanguage] = useState('auto');
   const [secondaryLanguage, setSecondaryLanguage] = useState('');
-  const [deepgramApiKey, setDeepgramApiKey] = useState('');
 
   useEffect(() => {
     loadConfig();
@@ -28,7 +27,6 @@ const Settings: React.FC = () => {
       setApiCallMethod(config.api_call_method || 'direct');
       setPrimaryLanguage(config.primaryLanguage || 'auto');
       setSecondaryLanguage(config.secondaryLanguage || '');
-      setDeepgramApiKey(config.deepgram_api_key || '');
     } catch (err) {
       console.error('Failed to load configuration', err);
       setError('Failed to load configuration. Please check your settings.');
@@ -43,7 +41,6 @@ const Settings: React.FC = () => {
         api_base: apiBase,
         api_call_method: apiCallMethod,
         primaryLanguage: primaryLanguage,
-        deepgram_api_key: deepgramApiKey,
       });
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 3000);
@@ -135,15 +132,6 @@ const Settings: React.FC = () => {
           <option value="direct">Direct</option>
           <option value="proxy">Proxy</option>
         </select>
-      </div>
-      <div className="mb-4">
-        <label className="label">Deepgram API Key</label>
-        <input
-          type="password"
-          value={deepgramApiKey}
-          onChange={(e) => setDeepgramApiKey(e.target.value)}
-          className="input input-bordered w-full"
-        />
       </div>
       <div className="mb-4">
         <label className="label">Primary Language</label>

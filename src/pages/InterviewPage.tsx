@@ -35,7 +35,16 @@ const InterviewPage: React.FC = () => {
   const [audioContext, setAudioContext] = useState<AudioContext | null>(null);
   const [processor, setProcessor] = useState<ScriptProcessorNode | null>(null);
   const [autoSubmitTimer, setAutoSubmitTimer] = useState<NodeJS.Timeout | null>(null);
+  const [isModelLoading, setIsModelLoading] = useState(true);
   const aiResponseRef = useRef<HTMLDivElement>(null);
+  const whisperPipelineRef = useRef<any>(null);
+  const audioQueueRef = useRef<Float32Array[]>([]);
+  const queueSampleCountRef = useRef(0);
+  const isProcessingRef = useRef(false);
+  const lastTranscriptTimeRef = useRef(Date.now());
+  const lastProcessedIndexRef = useRef(lastProcessedIndex);
+
+  const MIN_SAMPLES_PER_TRANSCRIPT = 16000 * 2;
 
   const markdownStyles = `
     .markdown-body {
@@ -72,6 +81,47 @@ const InterviewPage: React.FC = () => {
   useEffect(() => {
     loadConfig();
   }, []);
+
+  useEffect(() => {
+    lastProcessedIndexRef.current = lastProcessedIndex;
+  }, [lastProcessedIndex]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadWhisperModel = async () => {
+      try {
+        const { pipeline, env } = await import("@xenova/transformers");
+        env.allowLocalModels = true;
+        env.useBrowserCache = true;
+        const transcriber = await pipeline(
+          "automatic-speech-recognition",
+          "Xenova/whisper-small.en",
+          {
+            quantized: true,
+          }
+        );
+        if (isMounted) {
+          whisperPipelineRef.current = transcriber;
+          setIsModelLoading(false);
+        }
+      } catch (err: any) {
+        console.error("Failed to load Whisper model", err);
+        if (isMounted) {
+          setIsModelLoading(false);
+          setError(
+            "Failed to load Whisper model. Please check your internet connection for the initial download and restart the app."
+          );
+        }
+      }
+    };
+
+    loadWhisperModel();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [setError]);
 
   const handleAskGPT = async (newContent?: string) => {
     const contentToProcess = newContent || currentText.slice(lastProcessedIndex).trim();
@@ -114,40 +164,105 @@ const InterviewPage: React.FC = () => {
     handleAskGPT(newContent);
   }, [handleAskGPT]);
 
+  const handleTranscript = useCallback((transcript: string) => {
+    const trimmedTranscript = transcript.trim();
+    if (!trimmedTranscript) {
+      return;
+    }
+
+    lastTranscriptTimeRef.current = Date.now();
+
+    setCurrentText((prev: string) => {
+      if (!prev.endsWith(trimmedTranscript)) {
+        const updatedText = prev + (prev ? '\n' : '') + trimmedTranscript;
+
+        if (isAutoGPTEnabled) {
+          if (autoSubmitTimer) {
+            clearTimeout(autoSubmitTimer);
+          }
+          const newTimer = setTimeout(() => {
+            const newContent = updatedText.slice(lastProcessedIndexRef.current);
+            if (newContent.trim()) {
+              handleAskGPTStable(newContent);
+            }
+          }, 2000);
+          setAutoSubmitTimer(newTimer);
+        }
+
+        return updatedText;
+      }
+      return prev;
+    });
+  }, [autoSubmitTimer, handleAskGPTStable, isAutoGPTEnabled, setCurrentText]);
+
+  const processAudioQueue = useCallback(async () => {
+    if (isProcessingRef.current || !whisperPipelineRef.current) {
+      return;
+    }
+
+    if (queueSampleCountRef.current < MIN_SAMPLES_PER_TRANSCRIPT) {
+      return;
+    }
+
+    isProcessingRef.current = true;
+
+    const samplesToProcess = Math.min(queueSampleCountRef.current, MIN_SAMPLES_PER_TRANSCRIPT);
+    const combined = new Float32Array(samplesToProcess);
+    let processedSamples = 0;
+    const newQueue: Float32Array[] = [];
+
+    for (const chunk of audioQueueRef.current) {
+      if (processedSamples >= samplesToProcess) {
+        newQueue.push(chunk);
+        continue;
+      }
+
+      const remaining = samplesToProcess - processedSamples;
+      const takeCount = Math.min(chunk.length, remaining);
+      combined.set(chunk.subarray(0, takeCount), processedSamples);
+      processedSamples += takeCount;
+
+      if (takeCount < chunk.length) {
+        newQueue.push(chunk.subarray(takeCount));
+      }
+    }
+
+    audioQueueRef.current = newQueue;
+    queueSampleCountRef.current = newQueue.reduce((sum, chunk) => sum + chunk.length, 0);
+
+    try {
+      const result = await whisperPipelineRef.current({
+        array: combined,
+        sampling_rate: 16000,
+      });
+
+      if (result?.text) {
+        handleTranscript(result.text);
+      }
+    } catch (err) {
+      console.error("Failed to transcribe audio chunk", err);
+      setError("Failed to process audio locally. Please try again.");
+    } finally {
+      isProcessingRef.current = false;
+      if (queueSampleCountRef.current >= MIN_SAMPLES_PER_TRANSCRIPT) {
+        setTimeout(() => {
+          processAudioQueue();
+        }, 0);
+      }
+    }
+  }, [handleTranscript, setError]);
+
+  const enqueueAudioChunk = useCallback((chunk: Float32Array) => {
+    audioQueueRef.current.push(chunk);
+    queueSampleCountRef.current += chunk.length;
+    processAudioQueue();
+  }, [processAudioQueue]);
+
   useEffect(() => {
-    let lastTranscriptTime = Date.now();
     let checkTimer: NodeJS.Timeout | null = null;
 
-    const handleDeepgramTranscript = (_event: any, data: any) => {
-      if (data.transcript && data.is_final) {
-        setCurrentText((prev: string) => {
-          const newTranscript = data.transcript.trim();
-          if (!prev.endsWith(newTranscript)) {
-            lastTranscriptTime = Date.now();
-            const updatedText = prev + (prev ? '\n' : '') + newTranscript;
-            
-            if (isAutoGPTEnabled) {
-              if (autoSubmitTimer) {
-                clearTimeout(autoSubmitTimer);
-              }
-              const newTimer = setTimeout(() => {
-                const newContent = updatedText.slice(lastProcessedIndex);
-                if (newContent.trim()) {
-                  handleAskGPTStable(newContent);
-                }
-              }, 2000);
-              setAutoSubmitTimer(newTimer);
-            }
-            
-            return updatedText;
-          }
-          return prev;
-        });
-      }
-    };
-
     const checkAndSubmit = () => {
-      if (isAutoGPTEnabled && Date.now() - lastTranscriptTime >= 2000) {
+      if (isAutoGPTEnabled && Date.now() - lastTranscriptTimeRef.current >= 2000) {
         const newContent = currentText.slice(lastProcessedIndex);
         if (newContent.trim()) {
           handleAskGPTStable(newContent);
@@ -156,31 +271,43 @@ const InterviewPage: React.FC = () => {
       checkTimer = setTimeout(checkAndSubmit, 1000);
     };
 
-    window.electronAPI.ipcRenderer.on('deepgram-transcript', handleDeepgramTranscript);
     checkTimer = setTimeout(checkAndSubmit, 1000);
 
     return () => {
-      window.electronAPI.ipcRenderer.removeListener('deepgram-transcript', handleDeepgramTranscript);
       if (checkTimer) {
         clearTimeout(checkTimer);
       }
     };
-  }, [isAutoGPTEnabled, lastProcessedIndex, currentText, handleAskGPTStable, setCurrentText, setLastProcessedIndex]);
+  }, [currentText, handleAskGPTStable, isAutoGPTEnabled, lastProcessedIndex]);
+
+  useEffect(() => {
+    if (!isAutoGPTEnabled && autoSubmitTimer) {
+      clearTimeout(autoSubmitTimer);
+      setAutoSubmitTimer(null);
+    }
+  }, [autoSubmitTimer, isAutoGPTEnabled]);
 
   const loadConfig = async () => {
     try {
       const config = await window.electronAPI.getConfig();
-      if (config && config.openai_key && config.deepgram_api_key) {
+      if (config && config.openai_key) {
         setIsConfigured(true);
       } else {
-        setError("OpenAI API key or Deepgram API key not configured. Please check settings.");
+        setIsConfigured(true);
+        setError("OpenAI API key not configured. GPT responses will be unavailable until configured.");
       }
     } catch (err) {
+      setIsConfigured(false);
       setError("Failed to load configuration. Please check settings.");
     }
   };
 
   const startRecording = async () => {
+    if (!whisperPipelineRef.current) {
+      setError("Whisper model is still loading. Please wait a moment and try again.");
+      return;
+    }
+
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: false,
@@ -192,13 +319,10 @@ const InterviewPage: React.FC = () => {
       });
       setUserMedia(stream);
 
-      const config = await window.electronAPI.getConfig();
-      const result = await window.electronAPI.ipcRenderer.invoke('start-deepgram', {
-        deepgram_key: config.deepgram_api_key
-      });
-      if (!result.success) {
-        throw new Error(result.error);
-      }
+      audioQueueRef.current = [];
+      queueSampleCountRef.current = 0;
+      isProcessingRef.current = false;
+      lastTranscriptTimeRef.current = Date.now();
 
       const context = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
       setAudioContext(context);
@@ -209,17 +333,24 @@ const InterviewPage: React.FC = () => {
       source.connect(processor);
       processor.connect(context.destination);
 
-      processor.onaudioprocess = (e: { inputBuffer: { getChannelData: (arg0: number) => any; }; }) => {
+      processor.onaudioprocess = (e: { inputBuffer: { getChannelData: (arg0: number) => Float32Array; }; }) => {
         const inputData = e.inputBuffer.getChannelData(0);
         const audioData = new Int16Array(inputData.length);
+        const floatChunk = new Float32Array(inputData.length);
+
         for (let i = 0; i < inputData.length; i++) {
-          audioData[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
+          const sample = Math.max(-1, Math.min(1, inputData[i]));
+          const intSample = sample < 0 ? Math.round(sample * 0x8000) : Math.round(sample * 0x7FFF);
+          audioData[i] = intSample;
+          floatChunk[i] = intSample / 0x8000;
         }
-        window.electronAPI.ipcRenderer.invoke('send-audio-to-deepgram', audioData.buffer);
+
+        enqueueAudioChunk(floatChunk);
       };
 
       setIsRecording(true);
     } catch (err: any) {
+      console.error("Failed to start recording", err);
       setError("Failed to start recording. Please check permissions or try again.");
     }
   };
@@ -233,8 +364,16 @@ const InterviewPage: React.FC = () => {
     }
     if (processor) {
       processor.disconnect();
+      processor.onaudioprocess = null;
     }
-    window.electronAPI.ipcRenderer.invoke('stop-deepgram');
+    if (autoSubmitTimer) {
+      clearTimeout(autoSubmitTimer);
+      setAutoSubmitTimer(null);
+    }
+    audioQueueRef.current = [];
+    queueSampleCountRef.current = 0;
+    isProcessingRef.current = false;
+    lastTranscriptTimeRef.current = Date.now();
     setIsRecording(false);
     setUserMedia(null);
     setAudioContext(null);
@@ -269,13 +408,17 @@ const InterviewPage: React.FC = () => {
       <style>{markdownStyles}</style>
       <ErrorDisplay error={error} onClose={clearError} />
       <div className="flex justify-center items-center space-x-2">
-        <button
-          onClick={isRecording ? stopRecording : startRecording}
-          disabled={!isConfigured}
-          className={`btn ${isRecording ? "btn-secondary" : "btn-primary"}`}
-        >
-          {isRecording ? "Stop Recording" : "Start Recording"}
-        </button>
+          <button
+            onClick={isRecording ? stopRecording : startRecording}
+            disabled={!isConfigured || isModelLoading}
+            className={`btn ${isRecording ? "btn-secondary" : "btn-primary"}`}
+          >
+            {isModelLoading && !isRecording
+              ? "Loading Whisper..."
+              : isRecording
+                ? "Stop Recording"
+                : "Start Recording"}
+          </button>
         <Timer isRunning={isRecording} />
         <label className="flex items-center">
           <input

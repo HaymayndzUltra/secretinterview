@@ -84,6 +84,70 @@ const InterviewPage: React.FC = () => {
     lastProcessedIndexRef.current = lastProcessedIndex;
   }, [lastProcessedIndex]);
 
+  const handleStreamingTranscript = useCallback((payload: { text: string; isFinal: boolean }) => {
+    if (!payload) {
+      return;
+    }
+
+    const trimmed = (payload.text || "").trim();
+    let finalSnapshot: string | null = null;
+
+    setCurrentText((prev: string) => {
+      let base = prev;
+      const activePartial = pendingPartialRef.current;
+      if (activePartial && prev.endsWith(activePartial)) {
+        base = prev.slice(0, -activePartial.length);
+      }
+
+      if (!trimmed) {
+        if (payload.isFinal) {
+          pendingPartialRef.current = "";
+          finalSnapshot = base;
+        } else {
+          pendingPartialRef.current = "";
+        }
+        return base;
+      }
+
+      let next = base + trimmed;
+      if (payload.isFinal) {
+        pendingPartialRef.current = "";
+        if (!next.endsWith("\n")) {
+          next += "\n";
+        }
+        finalSnapshot = next;
+      } else {
+        pendingPartialRef.current = trimmed;
+      }
+
+      return next;
+    });
+
+    if (trimmed) {
+      lastTranscriptTimeRef.current = Date.now();
+    }
+
+    if (payload.isFinal) {
+      const snapshot = (finalSnapshot ?? "").trimEnd();
+      if (!snapshot) {
+        return;
+      }
+
+      if (isAutoGPTEnabled) {
+        if (autoSubmitTimer) {
+          clearTimeout(autoSubmitTimer);
+        }
+        const newTimer = setTimeout(() => {
+          const newContent = snapshot.slice(lastProcessedIndexRef.current);
+          if (newContent.trim()) {
+            handleAskGPTStable(newContent);
+          }
+        }, 2000);
+        setAutoSubmitTimer(newTimer);
+      }
+    }
+  }, [autoSubmitTimer, handleAskGPTStable, isAutoGPTEnabled, setCurrentText]);
+
   useEffect(() => {
     const unsubscribeTranscript = window.electronAPI.onWhisperTranscript((payload) => {
       handleStreamingTranscript(payload);
@@ -150,70 +214,6 @@ const InterviewPage: React.FC = () => {
   const handleAskGPTStable = useCallback(async (newContent: string) => {
     handleAskGPT(newContent);
   }, [handleAskGPT]);
-
-  const handleStreamingTranscript = useCallback((payload: { text: string; isFinal: boolean }) => {
-    if (!payload) {
-      return;
-    }
-
-    const trimmed = (payload.text || "").trim();
-    let finalSnapshot: string | null = null;
-
-    setCurrentText((prev: string) => {
-      let base = prev;
-      const activePartial = pendingPartialRef.current;
-      if (activePartial && prev.endsWith(activePartial)) {
-        base = prev.slice(0, -activePartial.length);
-      }
-
-      if (!trimmed) {
-        if (payload.isFinal) {
-          pendingPartialRef.current = "";
-          finalSnapshot = base;
-        } else {
-          pendingPartialRef.current = "";
-        }
-        return base;
-      }
-
-      let next = base + trimmed;
-      if (payload.isFinal) {
-        pendingPartialRef.current = "";
-        if (!next.endsWith("\n")) {
-          next += "\n";
-        }
-        finalSnapshot = next;
-      } else {
-        pendingPartialRef.current = trimmed;
-      }
-
-      return next;
-    });
-
-    if (trimmed) {
-      lastTranscriptTimeRef.current = Date.now();
-    }
-
-    if (payload.isFinal) {
-      const snapshot = (finalSnapshot ?? "").trimEnd();
-      if (!snapshot) {
-        return;
-      }
-
-      if (isAutoGPTEnabled) {
-        if (autoSubmitTimer) {
-          clearTimeout(autoSubmitTimer);
-        }
-        const newTimer = setTimeout(() => {
-          const newContent = snapshot.slice(lastProcessedIndexRef.current);
-          if (newContent.trim()) {
-            handleAskGPTStable(newContent);
-          }
-        }, 2000);
-        setAutoSubmitTimer(newTimer);
-      }
-    }
-  }, [autoSubmitTimer, handleAskGPTStable, isAutoGPTEnabled, setCurrentText]);
 
   useEffect(() => {
     let checkTimer: NodeJS.Timeout | null = null;

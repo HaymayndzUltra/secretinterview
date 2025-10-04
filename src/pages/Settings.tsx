@@ -15,6 +15,7 @@ const Settings: React.FC = () => {
   const [secondaryLanguage, setSecondaryLanguage] = useState('');
   const [whisperBinaryPath, setWhisperBinaryPath] = useState('');
   const [whisperModelPath, setWhisperModelPath] = useState('');
+  const [useSystemAudio, setUseSystemAudio] = useState(false);
 
   useEffect(() => {
     loadConfig();
@@ -23,14 +24,16 @@ const Settings: React.FC = () => {
   const loadConfig = async () => {
     try {
       const config = await window.electronAPI.getConfig();
-      setApiKey(config.openai_key || '');
-      setApiModel(config.gpt_model || 'gpt-4o');
-      setApiBase(config.api_base || '');
-      setApiCallMethod(config.api_call_method || 'direct');
-      setPrimaryLanguage(config.primaryLanguage || 'auto');
-      setSecondaryLanguage(config.secondaryLanguage || '');
-      setWhisperBinaryPath(config.whisperBinaryPath || '');
-      setWhisperModelPath(config.whisperModelPath || '');
+      const normalizedConfig = config || {};
+      setApiKey(normalizedConfig.openai_key || '');
+      setApiModel(normalizedConfig.gpt_model || 'gpt-4o');
+      setApiBase(normalizedConfig.api_base || '');
+      setApiCallMethod(normalizedConfig.api_call_method || 'direct');
+      setPrimaryLanguage(normalizedConfig.primaryLanguage || 'auto');
+      setSecondaryLanguage(normalizedConfig.secondaryLanguage || '');
+      setWhisperBinaryPath(normalizedConfig.whisperBinaryPath || '');
+      setWhisperModelPath(normalizedConfig.whisperModelPath || '');
+      setUseSystemAudio(Boolean(normalizedConfig.useSystemAudio));
     } catch (err) {
       console.error('Failed to load configuration', err);
       setError('Failed to load configuration. Please check your settings.');
@@ -48,6 +51,7 @@ const Settings: React.FC = () => {
         secondaryLanguage: secondaryLanguage,
         whisperBinaryPath: whisperBinaryPath,
         whisperModelPath: whisperModelPath,
+        useSystemAudio,
       });
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 3000);
@@ -139,6 +143,23 @@ const Settings: React.FC = () => {
           <option value="direct">Direct</option>
           <option value="proxy">Proxy</option>
         </select>
+      </div>
+      <div className="mb-4 form-control">
+        <label className="label cursor-pointer">
+          <span className="label-text">Capture system audio instead of microphone</span>
+          <input
+            type="checkbox"
+            className="toggle"
+            checked={useSystemAudio}
+            onChange={(e) => setUseSystemAudio(e.target.checked)}
+          />
+        </label>
+        <label className="label">
+          <span className="label-text-alt">
+            When enabled, you will be prompted to allow screen recording so the app can capture
+            system audio.
+          </span>
+        </label>
       </div>
       <div className="mb-4">
         <label className="label">Primary Language</label>

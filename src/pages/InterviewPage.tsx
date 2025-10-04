@@ -261,6 +261,66 @@ const InterviewPage: React.FC = () => {
     }
   };
 
+  const buildMediaError = useCallback((err: unknown): Error => {
+    if (err instanceof DOMException) {
+      switch (err.name) {
+        case "NotFoundError":
+        case "DevicesNotFoundError":
+          return new Error("No microphone was detected. Please connect a microphone or check your audio device settings.");
+        case "NotAllowedError":
+        case "SecurityError":
+          return new Error("Microphone access was denied. Please allow microphone permissions and try again.");
+        case "NotReadableError":
+        case "AbortError":
+          return new Error("The microphone is currently unavailable. Please ensure no other application is using it and try again.");
+        case "OverconstrainedError":
+        case "ConstraintNotSatisfiedError":
+          return new Error("The current microphone configuration is not supported. Please try again or adjust your audio settings.");
+        default:
+          return new Error(err.message || "Failed to access the microphone. Please try again.");
+      }
+    }
+
+    if (err instanceof Error) {
+      return err;
+    }
+
+    return new Error("Failed to access the microphone. Please try again.");
+  }, []);
+
+  const requestMicrophoneStream = useCallback(async (): Promise<MediaStream> => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error("Microphone access is not supported in this environment.");
+    }
+
+    const preferredConstraints: MediaStreamConstraints = {
+      audio: {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        sampleRate: SAMPLE_RATE,
+      },
+      video: false,
+    };
+
+    try {
+      return await navigator.mediaDevices.getUserMedia(preferredConstraints);
+    } catch (primaryError) {
+      if (
+        primaryError instanceof DOMException &&
+        ["OverconstrainedError", "ConstraintNotSatisfiedError", "NotFoundError", "DevicesNotFoundError"].includes(primaryError.name)
+      ) {
+        try {
+          return await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        } catch (fallbackError) {
+          throw buildMediaError(fallbackError);
+        }
+      }
+
+      throw buildMediaError(primaryError);
+    }
+  }, [SAMPLE_RATE, buildMediaError]);
+
   const startRecording = useCallback(async () => {
     if (isRecording || isModelLoading) {
       return;
@@ -284,26 +344,7 @@ const InterviewPage: React.FC = () => {
         sampleRate: SAMPLE_RATE,
       };
 
-      const status = await window.electronAPI.startWhisperStream(whisperOptions);
-      whisperStarted = Boolean(status) && status.state !== "error";
-
-      if (status?.state === "error") {
-        throw new Error(status.message || "Failed to start Whisper engine. Please verify your configuration.");
-      }
-
-      if (status?.state === "ready") {
-        setIsModelLoading(false);
-      }
-
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          sampleRate: SAMPLE_RATE,
-        },
-        video: false,
-      });
+      stream = await requestMicrophoneStream();
       setUserMedia(stream);
 
       pendingPartialRef.current = "";
@@ -331,11 +372,21 @@ const InterviewPage: React.FC = () => {
       };
 
       setIsRecording(true);
+
+      const status = await window.electronAPI.startWhisperStream(whisperOptions);
+      whisperStarted = Boolean(status) && status.state !== "error";
+
+      if (status?.state === "error") {
+        throw new Error(status.message || "Failed to start Whisper engine. Please verify your configuration.");
+      }
+
+      if (status?.state === "ready") {
+        setIsModelLoading(false);
+      }
     } catch (err: any) {
       console.error("Failed to start recording", err);
-      const fallbackMessage = "Failed to start recording. Please check microphone permissions or try again.";
-      const errorMessage = err instanceof Error && err.message ? err.message : fallbackMessage;
-      setError(errorMessage);
+      const formattedError = buildMediaError(err);
+      setError(formattedError.message);
 
       if (stream) {
         stream.getTracks().forEach((track) => track.stop());
@@ -370,7 +421,7 @@ const InterviewPage: React.FC = () => {
       }
       setIsModelLoading(false);
     }
-  }, [SAMPLE_RATE, isModelLoading, isRecording, setError]);
+  }, [buildMediaError, isModelLoading, isRecording, requestMicrophoneStream, setError]);
 
   const stopRecording = useCallback(async () => {
     if (userMedia) {
@@ -406,10 +457,6 @@ const InterviewPage: React.FC = () => {
       console.warn("Failed to stop Whisper stream", err);
     }
   }, [audioContext, autoSubmitTimer, processor, userMedia]);
-
-  useEffect(() => {
-    loadConfig();
-  }, []);
 
   useEffect(() => {
     return () => {

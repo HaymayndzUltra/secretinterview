@@ -62,8 +62,9 @@ const InterviewPage: React.FC = () => {
   const loadConfig = async () => {
     try {
       const config = await window.electronAPI.getConfig();
-      configRef.current = config;
-      if (config && config.openai_key) {
+      const normalizedConfig = config || {};
+      configRef.current = normalizedConfig;
+      if (normalizedConfig && normalizedConfig.openai_key) {
         setIsConfigured(true);
       } else {
         setIsConfigured(true);
@@ -72,6 +73,7 @@ const InterviewPage: React.FC = () => {
     } catch (err) {
       setIsConfigured(false);
       setError("Failed to load configuration. Please check settings.");
+      configRef.current = {};
     }
   };
 
@@ -100,8 +102,8 @@ const InterviewPage: React.FC = () => {
 
   /** Request system or mic audio stream depending on config */
   const requestAudioStream = useCallback(async (): Promise<MediaStream> => {
-    const config = configRef.current;
-    const useSystemAudio = config?.useSystemAudio ?? false;
+    const config = (configRef.current ?? {}) as Record<string, any>;
+    const useSystemAudio = Boolean(config.useSystemAudio);
 
     if (useSystemAudio && navigator.mediaDevices.getDisplayMedia) {
       try {
@@ -160,12 +162,14 @@ const InterviewPage: React.FC = () => {
     let processorNode: ScriptProcessorNode | null = null;
 
     try {
-      const config = configRef.current || (await window.electronAPI.getConfig());
+      const config = configRef.current ?? (await window.electronAPI.getConfig());
+      const normalizedConfig = config || {};
+      configRef.current = normalizedConfig;
       setIsModelLoading(true);
       const whisperOptions = {
-        language: config?.primaryLanguage,
-        modelPath: config?.whisperModelPath,
-        binaryPath: config?.whisperBinaryPath,
+        language: normalizedConfig?.primaryLanguage,
+        modelPath: normalizedConfig?.whisperModelPath,
+        binaryPath: normalizedConfig?.whisperBinaryPath,
         sampleRate: SAMPLE_RATE
       };
 

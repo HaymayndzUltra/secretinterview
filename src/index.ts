@@ -53,13 +53,20 @@ const createWindow = (): void => {
     }
   );
 
+  const allowedPermissions = new Set([
+    "media",
+    "display-capture",
+    "audioCapture",
+  ]);
+
   mainWindow.webContents.session.setPermissionRequestHandler(
     (webContents, permission, callback) => {
-      if (permission === "media") {
+      if (allowedPermissions.has(permission)) {
         callback(true);
-      } else {
-        callback(false);
+        return;
       }
+
+      callback(false);
     }
   );
 
@@ -170,11 +177,15 @@ type TypedElectronStore = ElectronStore<StoreSchema> & {
 const store = new ElectronStore<StoreSchema>() as TypedElectronStore;
 
 ipcMain.handle("get-config", () => {
-  return store.get("config");
+  return store.get("config") ?? {};
 });
 
 ipcMain.handle("set-config", (event, config) => {
-  store.set("config", config);
+  const existingConfig = (store.get("config") ?? {}) as Record<string, any>;
+  store.set("config", {
+    ...existingConfig,
+    ...config,
+  });
 });
 
 ipcMain.handle("whisper:start", (event, options: WhisperStartOptions) => {

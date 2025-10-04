@@ -15,8 +15,9 @@ import { rendererConfig } from './webpack.renderer.config';
 const config: ForgeConfig = {
   packagerConfig: {
     asar: true,
-    icon: './src/assets/icon', 
-    name: 'Interview Assistant'
+    icon: './src/assets/icon',
+    name: 'Interview Assistant',
+    extraResource: ['whisper'],
   },
   rebuildConfig: {},
   makers: [

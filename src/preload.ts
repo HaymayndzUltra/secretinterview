@@ -23,4 +23,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
   transcribeAudioFile: (filePath: string, config: any) => ipcRenderer.invoke('transcribe-audio-file', filePath, config),
   saveTempAudioFile: (audioBuffer: ArrayBuffer) => ipcRenderer.invoke('save-temp-audio-file', audioBuffer),
   transcribeAudio: (audioBuffer: ArrayBuffer, config: any) => ipcRenderer.invoke('transcribe-audio', audioBuffer, config),
+  startWhisperStream: (options: any) => ipcRenderer.invoke('whisper:start', options),
+  stopWhisperStream: () => ipcRenderer.invoke('whisper:stop'),
+  sendWhisperAudioChunk: (chunk: ArrayBuffer) => ipcRenderer.send('whisper:audio-chunk', chunk),
+  onWhisperTranscript: (listener: (payload: any) => void) => {
+    const handler = (_event: unknown, payload: any) => listener(payload);
+    ipcRenderer.on('whisper:transcript', handler);
+    return () => ipcRenderer.removeListener('whisper:transcript', handler);
+  },
+  onWhisperStatus: (listener: (payload: any) => void) => {
+    const handler = (_event: unknown, payload: any) => listener(payload);
+    ipcRenderer.on('whisper:status', handler);
+    return () => ipcRenderer.removeListener('whisper:status', handler);
+  },
 });

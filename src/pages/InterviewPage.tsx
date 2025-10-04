@@ -35,7 +35,14 @@ const InterviewPage: React.FC = () => {
   const [audioContext, setAudioContext] = useState<AudioContext | null>(null);
   const [processor, setProcessor] = useState<ScriptProcessorNode | null>(null);
   const [autoSubmitTimer, setAutoSubmitTimer] = useState<NodeJS.Timeout | null>(null);
+  const [isModelLoading, setIsModelLoading] = useState(false);
   const aiResponseRef = useRef<HTMLDivElement>(null);
+  const pendingPartialRef = useRef<string>("");
+  const lastTranscriptTimeRef = useRef(Date.now());
+  const lastProcessedIndexRef = useRef(lastProcessedIndex);
+  const configRef = useRef<any>(null);
+
+  const SAMPLE_RATE = 16000;
 
   const markdownStyles = `
     .markdown-body {
@@ -72,6 +79,36 @@ const InterviewPage: React.FC = () => {
   useEffect(() => {
     loadConfig();
   }, []);
+
+  useEffect(() => {
+    lastProcessedIndexRef.current = lastProcessedIndex;
+  }, [lastProcessedIndex]);
+
+  useEffect(() => {
+    const unsubscribeTranscript = window.electronAPI.onWhisperTranscript((payload) => {
+      handleStreamingTranscript(payload);
+    });
+
+    const unsubscribeStatus = window.electronAPI.onWhisperStatus((status) => {
+      if (status.state === "loading") {
+        setIsModelLoading(true);
+      } else if (status.state === "ready") {
+        setIsModelLoading(false);
+      } else if (status.state === "stopped" || status.state === "idle") {
+        setIsModelLoading(false);
+      } else if (status.state === "error") {
+        setIsModelLoading(false);
+        if (status.message) {
+          setError(status.message);
+        }
+      }
+    });
+
+    return () => {
+      unsubscribeTranscript?.();
+      unsubscribeStatus?.();
+    };
+  }, [handleStreamingTranscript, setError]);
 
   const handleAskGPT = async (newContent?: string) => {
     const contentToProcess = newContent || currentText.slice(lastProcessedIndex).trim();
@@ -114,40 +151,75 @@ const InterviewPage: React.FC = () => {
     handleAskGPT(newContent);
   }, [handleAskGPT]);
 
+  const handleStreamingTranscript = useCallback((payload: { text: string; isFinal: boolean }) => {
+    if (!payload) {
+      return;
+    }
+
+    const trimmed = (payload.text || "").trim();
+    let finalSnapshot: string | null = null;
+
+    setCurrentText((prev: string) => {
+      let base = prev;
+      const activePartial = pendingPartialRef.current;
+      if (activePartial && prev.endsWith(activePartial)) {
+        base = prev.slice(0, -activePartial.length);
+      }
+
+      if (!trimmed) {
+        if (payload.isFinal) {
+          pendingPartialRef.current = "";
+          finalSnapshot = base;
+        } else {
+          pendingPartialRef.current = "";
+        }
+        return base;
+      }
+
+      let next = base + trimmed;
+      if (payload.isFinal) {
+        pendingPartialRef.current = "";
+        if (!next.endsWith("\n")) {
+          next += "\n";
+        }
+        finalSnapshot = next;
+      } else {
+        pendingPartialRef.current = trimmed;
+      }
+
+      return next;
+    });
+
+    if (trimmed) {
+      lastTranscriptTimeRef.current = Date.now();
+    }
+
+    if (payload.isFinal) {
+      const snapshot = (finalSnapshot ?? "").trimEnd();
+      if (!snapshot) {
+        return;
+      }
+
+      if (isAutoGPTEnabled) {
+        if (autoSubmitTimer) {
+          clearTimeout(autoSubmitTimer);
+        }
+        const newTimer = setTimeout(() => {
+          const newContent = snapshot.slice(lastProcessedIndexRef.current);
+          if (newContent.trim()) {
+            handleAskGPTStable(newContent);
+          }
+        }, 2000);
+        setAutoSubmitTimer(newTimer);
+      }
+    }
+  }, [autoSubmitTimer, handleAskGPTStable, isAutoGPTEnabled, setCurrentText]);
+
   useEffect(() => {
-    let lastTranscriptTime = Date.now();
     let checkTimer: NodeJS.Timeout | null = null;
 
-    const handleDeepgramTranscript = (_event: any, data: any) => {
-      if (data.transcript && data.is_final) {
-        setCurrentText((prev: string) => {
-          const newTranscript = data.transcript.trim();
-          if (!prev.endsWith(newTranscript)) {
-            lastTranscriptTime = Date.now();
-            const updatedText = prev + (prev ? '\n' : '') + newTranscript;
-            
-            if (isAutoGPTEnabled) {
-              if (autoSubmitTimer) {
-                clearTimeout(autoSubmitTimer);
-              }
-              const newTimer = setTimeout(() => {
-                const newContent = updatedText.slice(lastProcessedIndex);
-                if (newContent.trim()) {
-                  handleAskGPTStable(newContent);
-                }
-              }, 2000);
-              setAutoSubmitTimer(newTimer);
-            }
-            
-            return updatedText;
-          }
-          return prev;
-        });
-      }
-    };
-
     const checkAndSubmit = () => {
-      if (isAutoGPTEnabled && Date.now() - lastTranscriptTime >= 2000) {
+      if (isAutoGPTEnabled && Date.now() - lastTranscriptTimeRef.current >= 2000) {
         const newContent = currentText.slice(lastProcessedIndex);
         if (newContent.trim()) {
           handleAskGPTStable(newContent);
@@ -156,99 +228,193 @@ const InterviewPage: React.FC = () => {
       checkTimer = setTimeout(checkAndSubmit, 1000);
     };
 
-    window.electronAPI.ipcRenderer.on('deepgram-transcript', handleDeepgramTranscript);
     checkTimer = setTimeout(checkAndSubmit, 1000);
 
     return () => {
-      window.electronAPI.ipcRenderer.removeListener('deepgram-transcript', handleDeepgramTranscript);
       if (checkTimer) {
         clearTimeout(checkTimer);
       }
     };
-  }, [isAutoGPTEnabled, lastProcessedIndex, currentText, handleAskGPTStable, setCurrentText, setLastProcessedIndex]);
+  }, [currentText, handleAskGPTStable, isAutoGPTEnabled, lastProcessedIndex]);
+
+  useEffect(() => {
+    if (!isAutoGPTEnabled && autoSubmitTimer) {
+      clearTimeout(autoSubmitTimer);
+      setAutoSubmitTimer(null);
+    }
+  }, [autoSubmitTimer, isAutoGPTEnabled]);
 
   const loadConfig = async () => {
     try {
       const config = await window.electronAPI.getConfig();
-      if (config && config.openai_key && config.deepgram_api_key) {
+      configRef.current = config;
+      if (config && config.openai_key) {
         setIsConfigured(true);
       } else {
-        setError("OpenAI API key or Deepgram API key not configured. Please check settings.");
+        setIsConfigured(true);
+        setError("OpenAI API key not configured. GPT responses will be unavailable until configured.");
       }
     } catch (err) {
+      setIsConfigured(false);
       setError("Failed to load configuration. Please check settings.");
     }
   };
 
-  const startRecording = async () => {
+  const startRecording = useCallback(async () => {
+    if (isRecording || isModelLoading) {
+      return;
+    }
+
+    let whisperStarted = false;
+    let stream: MediaStream | null = null;
+    let context: AudioContext | null = null;
+    let processorNode: ScriptProcessorNode | null = null;
+
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: false,
+      const existingConfig = configRef.current || await window.electronAPI.getConfig();
+      configRef.current = existingConfig;
+
+      setIsModelLoading(true);
+
+      const whisperOptions = {
+        language: existingConfig?.primaryLanguage,
+        modelPath: existingConfig?.whisperModelPath,
+        binaryPath: existingConfig?.whisperBinaryPath,
+        sampleRate: SAMPLE_RATE,
+      };
+
+      const status = await window.electronAPI.startWhisperStream(whisperOptions);
+      whisperStarted = Boolean(status) && status.state !== "error";
+
+      if (status?.state === "error") {
+        throw new Error(status.message || "Failed to start Whisper engine. Please verify your configuration.");
+      }
+
+      if (status?.state === "ready") {
+        setIsModelLoading(false);
+      }
+
+      stream = await navigator.mediaDevices.getUserMedia({
         audio: {
+          channelCount: 1,
           echoCancellation: true,
           noiseSuppression: true,
-          sampleRate: 16000,
+          sampleRate: SAMPLE_RATE,
         },
+        video: false,
       });
       setUserMedia(stream);
 
-      const config = await window.electronAPI.getConfig();
-      const result = await window.electronAPI.ipcRenderer.invoke('start-deepgram', {
-        deepgram_key: config.deepgram_api_key
-      });
-      if (!result.success) {
-        throw new Error(result.error);
-      }
+      pendingPartialRef.current = "";
+      lastTranscriptTimeRef.current = Date.now();
 
-      const context = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+      context = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
       setAudioContext(context);
       const source = context.createMediaStreamSource(stream);
-      const processor = context.createScriptProcessor(4096, 1, 1);
-      setProcessor(processor);
+      processorNode = context.createScriptProcessor(4096, 1, 1);
+      setProcessor(processorNode);
 
-      source.connect(processor);
-      processor.connect(context.destination);
+      source.connect(processorNode);
+      processorNode.connect(context.destination);
 
-      processor.onaudioprocess = (e: { inputBuffer: { getChannelData: (arg0: number) => any; }; }) => {
+      processorNode.onaudioprocess = (e: { inputBuffer: { getChannelData: (index: number) => Float32Array } }) => {
         const inputData = e.inputBuffer.getChannelData(0);
         const audioData = new Int16Array(inputData.length);
+
         for (let i = 0; i < inputData.length; i++) {
-          audioData[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
+          const sample = Math.max(-1, Math.min(1, inputData[i]));
+          audioData[i] = sample < 0 ? Math.round(sample * 0x8000) : Math.round(sample * 0x7FFF);
         }
-        window.electronAPI.ipcRenderer.invoke('send-audio-to-deepgram', audioData.buffer);
+
+        window.electronAPI.sendWhisperAudioChunk(audioData.buffer);
       };
 
       setIsRecording(true);
     } catch (err: any) {
-      setError("Failed to start recording. Please check permissions or try again.");
-    }
-  };
+      console.error("Failed to start recording", err);
+      const fallbackMessage = "Failed to start recording. Please check microphone permissions or try again.";
+      const errorMessage = err instanceof Error && err.message ? err.message : fallbackMessage;
+      setError(errorMessage);
 
-  const stopRecording = () => {
+      if (stream) {
+        stream.getTracks().forEach((track) => track.stop());
+      }
+
+      if (processorNode) {
+        processorNode.disconnect();
+        processorNode.onaudioprocess = null;
+      }
+
+      if (context) {
+        try {
+          await context.close();
+        } catch (closeError) {
+          console.warn("Failed to close audio context", closeError);
+        }
+      }
+
+      setUserMedia(null);
+      setAudioContext(null);
+      setProcessor(null);
+      setIsRecording(false);
+      pendingPartialRef.current = "";
+      lastTranscriptTimeRef.current = Date.now();
+
+      if (whisperStarted && window.electronAPI?.stopWhisperStream) {
+        try {
+          await window.electronAPI.stopWhisperStream();
+        } catch (stopError) {
+          console.warn("Failed to stop Whisper stream after error", stopError);
+        }
+      }
+      setIsModelLoading(false);
+    }
+  }, [SAMPLE_RATE, isModelLoading, isRecording, setError]);
+
+  const stopRecording = useCallback(async () => {
     if (userMedia) {
       userMedia.getTracks().forEach((track) => track.stop());
     }
     if (audioContext) {
-      audioContext.close();
+      try {
+        await audioContext.close();
+      } catch (err) {
+        console.warn("Failed to close audio context", err);
+      }
     }
     if (processor) {
       processor.disconnect();
+      processor.onaudioprocess = null;
     }
-    window.electronAPI.ipcRenderer.invoke('stop-deepgram');
+    if (autoSubmitTimer) {
+      clearTimeout(autoSubmitTimer);
+      setAutoSubmitTimer(null);
+    }
+
+    pendingPartialRef.current = "";
+    lastTranscriptTimeRef.current = Date.now();
     setIsRecording(false);
     setUserMedia(null);
     setAudioContext(null);
     setProcessor(null);
-  };
+    setIsModelLoading(false);
+
+    try {
+      await window.electronAPI.stopWhisperStream();
+    } catch (err) {
+      console.warn("Failed to stop Whisper stream", err);
+    }
+  }, [audioContext, autoSubmitTimer, processor, userMedia]);
 
   useEffect(() => {
     loadConfig();
-    return () => {
-      if (isRecording) {
-        stopRecording();
-      }
-    };
   }, []);
+
+  useEffect(() => {
+    return () => {
+      stopRecording();
+    };
+  }, [stopRecording]);
 
   useEffect(() => {
     if (aiResponseRef.current) {
@@ -269,13 +435,17 @@ const InterviewPage: React.FC = () => {
       <style>{markdownStyles}</style>
       <ErrorDisplay error={error} onClose={clearError} />
       <div className="flex justify-center items-center space-x-2">
-        <button
-          onClick={isRecording ? stopRecording : startRecording}
-          disabled={!isConfigured}
-          className={`btn ${isRecording ? "btn-secondary" : "btn-primary"}`}
-        >
-          {isRecording ? "Stop Recording" : "Start Recording"}
-        </button>
+          <button
+            onClick={isRecording ? stopRecording : startRecording}
+            disabled={!isConfigured || (isModelLoading && !isRecording)}
+            className={`btn ${isRecording ? "btn-secondary" : "btn-primary"}`}
+          >
+            {isModelLoading && !isRecording
+              ? "Loading Whisper..."
+              : isRecording
+                ? "Stop Recording"
+                : "Start Recording"}
+          </button>
         <Timer isRunning={isRecording} />
         <label className="flex items-center">
           <input

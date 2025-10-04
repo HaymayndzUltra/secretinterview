@@ -54,8 +54,8 @@ const createWindow = (): void => {
   );
 
   mainWindow.webContents.session.setPermissionRequestHandler(
-    (webContents, permission, callback) => {
-      if (permission === "media") {
+    (_webContents, permission, callback) => {
+      if (permission === "media" || permission === "display-capture") {
         callback(true);
       } else {
         callback(false);
@@ -170,11 +170,12 @@ type TypedElectronStore = ElectronStore<StoreSchema> & {
 const store = new ElectronStore<StoreSchema>() as TypedElectronStore;
 
 ipcMain.handle("get-config", () => {
-  return store.get("config");
+  return store.get("config") ?? {};
 });
 
-ipcMain.handle("set-config", (event, config) => {
-  store.set("config", config);
+ipcMain.handle("set-config", (_event, config) => {
+  const existingConfig = store.get("config") ?? {};
+  store.set("config", { ...existingConfig, ...config });
 });
 
 ipcMain.handle("whisper:start", (event, options: WhisperStartOptions) => {

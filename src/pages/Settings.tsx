@@ -15,6 +15,7 @@ const Settings: React.FC = () => {
   const [secondaryLanguage, setSecondaryLanguage] = useState('');
   const [whisperBinaryPath, setWhisperBinaryPath] = useState('');
   const [whisperModelPath, setWhisperModelPath] = useState('');
+  const [useSystemAudio, setUseSystemAudio] = useState(false);
 
   useEffect(() => {
     loadConfig();
@@ -31,6 +32,7 @@ const Settings: React.FC = () => {
       setSecondaryLanguage(config.secondaryLanguage || '');
       setWhisperBinaryPath(config.whisperBinaryPath || '');
       setWhisperModelPath(config.whisperModelPath || '');
+      setUseSystemAudio(Boolean(config.useSystemAudio));
     } catch (err) {
       console.error('Failed to load configuration', err);
       setError('Failed to load configuration. Please check your settings.');
@@ -48,6 +50,7 @@ const Settings: React.FC = () => {
         secondaryLanguage: secondaryLanguage,
         whisperBinaryPath: whisperBinaryPath,
         whisperModelPath: whisperModelPath,
+        useSystemAudio,
       });
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 3000);
@@ -192,6 +195,23 @@ const Settings: React.FC = () => {
             Models should be ggml/gguf whisper checkpoints compatible with whisper.cpp.
           </span>
         </label>
+      </div>
+      <div className="mb-6">
+        <label className="label cursor-pointer justify-start space-x-2">
+          <input
+            type="checkbox"
+            className="checkbox"
+            checked={useSystemAudio}
+            onChange={(e) => setUseSystemAudio(e.target.checked)}
+          />
+          <span className="label-text">
+            Capture system audio (requires screen/audio capture permission)
+          </span>
+        </label>
+        <p className="text-sm text-base-content/70 mt-1">
+          When enabled the app will request screen capture to record system audio.
+          Disable if you prefer microphone input only.
+        </p>
       </div>
       <div className="flex justify-between mt-4">
         <button onClick={handleSave} className="btn btn-primary">

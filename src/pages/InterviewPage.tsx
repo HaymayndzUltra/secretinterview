@@ -84,70 +84,6 @@ const InterviewPage: React.FC = () => {
     lastProcessedIndexRef.current = lastProcessedIndex;
   }, [lastProcessedIndex]);
 
-  const handleStreamingTranscript = useCallback((payload: { text: string; isFinal: boolean }) => {
-    if (!payload) {
-      return;
-    }
-
-    const trimmed = (payload.text || "").trim();
-    let finalSnapshot: string | null = null;
-
-    setCurrentText((prev: string) => {
-      let base = prev;
-      const activePartial = pendingPartialRef.current;
-      if (activePartial && prev.endsWith(activePartial)) {
-        base = prev.slice(0, -activePartial.length);
-      }
-
-      if (!trimmed) {
-        if (payload.isFinal) {
-          pendingPartialRef.current = "";
-          finalSnapshot = base;
-        } else {
-          pendingPartialRef.current = "";
-        }
-        return base;
-      }
-
-      let next = base + trimmed;
-      if (payload.isFinal) {
-        pendingPartialRef.current = "";
-        if (!next.endsWith("\n")) {
-          next += "\n";
-        }
-        finalSnapshot = next;
-      } else {
-        pendingPartialRef.current = trimmed;
-      }
-
-      return next;
-    });
-
-    if (trimmed) {
-      lastTranscriptTimeRef.current = Date.now();
-    }
-
-    if (payload.isFinal) {
-      const snapshot = (finalSnapshot ?? "").trimEnd();
-      if (!snapshot) {
-        return;
-      }
-
-      if (isAutoGPTEnabled) {
-        if (autoSubmitTimer) {
-          clearTimeout(autoSubmitTimer);
-        }
-        const newTimer = setTimeout(() => {
-          const newContent = snapshot.slice(lastProcessedIndexRef.current);
-          if (newContent.trim()) {
-            handleAskGPTStable(newContent);
-          }
-        }, 2000);
-        setAutoSubmitTimer(newTimer);
-      }
-    }
-  }, [autoSubmitTimer, handleAskGPTStable, isAutoGPTEnabled, setCurrentText]);
-
   useEffect(() => {
     const unsubscribeTranscript = window.electronAPI.onWhisperTranscript((payload) => {
       handleStreamingTranscript(payload);
@@ -215,6 +151,70 @@ const InterviewPage: React.FC = () => {
     handleAskGPT(newContent);
   }, [handleAskGPT]);
 
+  const handleStreamingTranscript = useCallback((payload: { text: string; isFinal: boolean }) => {
+    if (!payload) {
+      return;
+    }
+
+    const trimmed = (payload.text || "").trim();
+    let finalSnapshot: string | null = null;
+
+    setCurrentText((prev: string) => {
+      let base = prev;
+      const activePartial = pendingPartialRef.current;
+      if (activePartial && prev.endsWith(activePartial)) {
+        base = prev.slice(0, -activePartial.length);
+      }
+
+      if (!trimmed) {
+        if (payload.isFinal) {
+          pendingPartialRef.current = "";
+          finalSnapshot = base;
+        } else {
+          pendingPartialRef.current = "";
+        }
+        return base;
+      }
+
+      let next = base + trimmed;
+      if (payload.isFinal) {
+        pendingPartialRef.current = "";
+        if (!next.endsWith("\n")) {
+          next += "\n";
+        }
+        finalSnapshot = next;
+      } else {
+        pendingPartialRef.current = trimmed;
+      }
+
+      return next;
+    });
+
+    if (trimmed) {
+      lastTranscriptTimeRef.current = Date.now();
+    }
+
+    if (payload.isFinal) {
+      const snapshot = (finalSnapshot ?? "").trimEnd();
+      if (!snapshot) {
+        return;
+      }
+
+      if (isAutoGPTEnabled) {
+        if (autoSubmitTimer) {
+          clearTimeout(autoSubmitTimer);
+        }
+        const newTimer = setTimeout(() => {
+          const newContent = snapshot.slice(lastProcessedIndexRef.current);
+          if (newContent.trim()) {
+            handleAskGPTStable(newContent);
+          }
+        }, 2000);
+        setAutoSubmitTimer(newTimer);
+      }
+    }
+  }, [autoSubmitTimer, handleAskGPTStable, isAutoGPTEnabled, setCurrentText]);
+
   useEffect(() => {
     let checkTimer: NodeJS.Timeout | null = null;
 
@@ -260,10 +260,15 @@ const InterviewPage: React.FC = () => {
     }
   };
 
-  const startRecording = async () => {
+  const startRecording = useCallback(async () => {
     if (isRecording || isModelLoading) {
       return;
     }
+
+    let whisperStarted = false;
+    let stream: MediaStream | null = null;
+    let context: AudioContext | null = null;
+    let processorNode: ScriptProcessorNode | null = null;
 
     try {
       const existingConfig = configRef.current || await window.electronAPI.getConfig();
@@ -279,17 +284,17 @@ const InterviewPage: React.FC = () => {
       };
 
       const status = await window.electronAPI.startWhisperStream(whisperOptions);
+      whisperStarted = Boolean(status) && status.state !== "error";
+
       if (status?.state === "error") {
-        setIsModelLoading(false);
-        setError(status.message || "Failed to start Whisper engine. Please verify your configuration.");
-        return;
+        throw new Error(status.message || "Failed to start Whisper engine. Please verify your configuration.");
       }
 
       if (status?.state === "ready") {
         setIsModelLoading(false);
       }
 
-      const stream = await navigator.mediaDevices.getUserMedia({
+      stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
           echoCancellation: true,
@@ -303,10 +308,10 @@ const InterviewPage: React.FC = () => {
       pendingPartialRef.current = "";
       lastTranscriptTimeRef.current = Date.now();
 
-      const context = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
+      context = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
       setAudioContext(context);
       const source = context.createMediaStreamSource(stream);
-      const processorNode = context.createScriptProcessor(4096, 1, 1);
+      processorNode = context.createScriptProcessor(4096, 1, 1);
       setProcessor(processorNode);
 
       source.connect(processorNode);
@@ -327,11 +332,44 @@ const InterviewPage: React.FC = () => {
       setIsRecording(true);
     } catch (err: any) {
       console.error("Failed to start recording", err);
-      setError("Failed to start recording. Please check microphone permissions or try again.");
+      const fallbackMessage = "Failed to start recording. Please check microphone permissions or try again.";
+      const errorMessage = err instanceof Error && err.message ? err.message : fallbackMessage;
+      setError(errorMessage);
+
+      if (stream) {
+        stream.getTracks().forEach((track) => track.stop());
+      }
+
+      if (processorNode) {
+        processorNode.disconnect();
+        processorNode.onaudioprocess = null;
+      }
+
+      if (context) {
+        try {
+          await context.close();
+        } catch (closeError) {
+          console.warn("Failed to close audio context", closeError);
+        }
+      }
+
+      setUserMedia(null);
+      setAudioContext(null);
+      setProcessor(null);
+      setIsRecording(false);
+      pendingPartialRef.current = "";
+      lastTranscriptTimeRef.current = Date.now();
+
+      if (whisperStarted && window.electronAPI?.stopWhisperStream) {
+        try {
+          await window.electronAPI.stopWhisperStream();
+        } catch (stopError) {
+          console.warn("Failed to stop Whisper stream after error", stopError);
+        }
+      }
       setIsModelLoading(false);
-      await window.electronAPI.stopWhisperStream();
     }
-  };
+  }, [SAMPLE_RATE, isModelLoading, isRecording, setError]);
 
   const stopRecording = useCallback(async () => {
     if (userMedia) {

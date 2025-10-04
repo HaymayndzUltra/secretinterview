@@ -170,11 +170,12 @@ type TypedElectronStore = ElectronStore<StoreSchema> & {
 const store = new ElectronStore<StoreSchema>() as TypedElectronStore;
 
 ipcMain.handle("get-config", () => {
-  return store.get("config");
+  return store.get("config") ?? {};
 });
 
 ipcMain.handle("set-config", (event, config) => {
-  store.set("config", config);
+  const existingConfig = store.get("config") ?? {};
+  store.set("config", { ...existingConfig, ...config });
 });
 
 ipcMain.handle("whisper:start", (event, options: WhisperStartOptions) => {
@@ -238,8 +239,9 @@ ipcMain.handle("highlightCode", async (event, code, language) => {
 });
 
 app.on("before-quit", () => {
-  const config = store.get("config") || {};
-  const apiInfo = {
+  const config = store.get("config") ?? {};
+  const sanitizedConfig = {
+    ...config,
     openai_key: config.openai_key || "",
     api_base: config.api_base || "",
     gpt_model: config.gpt_model || "",
@@ -248,9 +250,10 @@ app.on("before-quit", () => {
     secondaryLanguage: config.secondaryLanguage || "",
     whisperBinaryPath: config.whisperBinaryPath || "",
     whisperModelPath: config.whisperModelPath || "",
+    useSystemAudio: Boolean(config.useSystemAudio),
   };
   store.clear();
-  store.set("config", apiInfo);
+  store.set("config", sanitizedConfig);
   whisperBridge.stop();
 });
 

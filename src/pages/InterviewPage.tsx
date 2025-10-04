@@ -61,7 +61,7 @@ const InterviewPage: React.FC = () => {
 
   const loadConfig = async () => {
     try {
-      const config = await window.electronAPI.getConfig();
+      const config = (await window.electronAPI.getConfig()) ?? {};
       configRef.current = config;
       if (config && config.openai_key) {
         setIsConfigured(true);
@@ -160,7 +160,8 @@ const InterviewPage: React.FC = () => {
     let processorNode: ScriptProcessorNode | null = null;
 
     try {
-      const config = configRef.current || (await window.electronAPI.getConfig());
+      const config = configRef.current || (await window.electronAPI.getConfig()) || {};
+      configRef.current = config;
       setIsModelLoading(true);
       const whisperOptions = {
         language: config?.primaryLanguage,

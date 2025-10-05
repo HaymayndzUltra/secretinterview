@@ -1,4 +1,4 @@
-import { ConversationSummary } from '../contexts/KnowledgeBaseContext';
+import { ConversationSummary, KnowledgeCategory } from '../contexts/KnowledgeBaseContext';
 
 export interface SummaryGenerationRequest {
   userMessage: string;
@@ -111,7 +111,8 @@ export async function generateEmbedding(text: string): Promise<number[]> {
 export function createConversationSummary(
   userMessage: string,
   assistantResponse: string,
-  summaryData: SummaryGenerationResult
+  summaryData: SummaryGenerationResult,
+  category: KnowledgeCategory
 ): ConversationSummary {
   return {
     id: `summary_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
@@ -120,11 +121,41 @@ export function createConversationSummary(
     tags: summaryData.tags,
     embedding: summaryData.embedding,
     pinned: false,
+    category,
     conversationContext: {
       userMessage,
       assistantResponse
     }
   };
+}
+
+function determineSummaryCategory(summary: string, tags: string[]): KnowledgeCategory {
+  const normalizedText = `${summary} ${tags.join(' ')}`.toLowerCase();
+
+  const containsAny = (keywords: string[]) => keywords.some(keyword => normalizedText.includes(keyword));
+
+  if (containsAny(['resume', 'profile', 'background', 'experience', 'skill'])) {
+    return KnowledgeCategory.Profile;
+  }
+
+  if (containsAny(['document', 'upload', 'transcript', 'reference'])) {
+    return KnowledgeCategory.Document;
+  }
+
+  if (containsAny(['follow-up', 'todo', 'next step', 'action', 'task', 'reminder'])) {
+    return KnowledgeCategory.ActionItem;
+  }
+
+  if (containsAny(['feedback', 'strength', 'weakness', 'improve', 'evaluation'])) {
+    return KnowledgeCategory.Feedback;
+  }
+
+  return KnowledgeCategory.Conversation;
+}
+
+export interface ProcessedConversationExchange {
+  conversationSummary: ConversationSummary;
+  knowledgeCategory: KnowledgeCategory;
 }
 
 /**
@@ -134,7 +165,7 @@ export async function processConversationExchange(
   userMessage: string,
   assistantResponse: string,
   conversationHistory?: Array<{ role: string; content: string }>
-): Promise<ConversationSummary> {
+): Promise<ProcessedConversationExchange> {
   const summaryData = await generateConversationSummary({
     userMessage,
     assistantResponse,
@@ -148,7 +179,12 @@ export async function processConversationExchange(
     );
   }
 
-  return createConversationSummary(userMessage, assistantResponse, summaryData);
+  const category = determineSummaryCategory(summaryData.summary, summaryData.tags);
+
+  return {
+    conversationSummary: createConversationSummary(userMessage, assistantResponse, summaryData, category),
+    knowledgeCategory: category,
+  };
 }
 
 /**

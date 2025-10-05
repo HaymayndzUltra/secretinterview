@@ -6,9 +6,9 @@ declare global {
   }
 }
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import Timer from "../components/Timer";
-import { useKnowledgeBase } from "../contexts/KnowledgeBaseContext";
+import { useKnowledgeBase, KnowledgeCategory, KnowledgeEntry } from "../contexts/KnowledgeBaseContext";
 import ErrorDisplay from "../components/ErrorDisplay";
 import { useError } from "../contexts/ErrorContext";
 import { ResponseSegment, useInterview } from "../contexts/InterviewContext";
@@ -18,9 +18,21 @@ import ReactMarkdown from 'react-markdown';
 import { buildInterviewPrompt } from '../utils/promptBuilder';
 import { processConversationExchange } from '../services/conversationMemory';
 import TeleprompterViewer from "../components/TeleprompterViewer";
+import OpenAI from 'openai';
 
 const InterviewPage: React.FC = () => {
-  const { knowledgeBase, conversations, addConversation, clearConversations, profileSummary, selectedScenario, templateContent, addConversationSummary, getRelevantSummaries } = useKnowledgeBase();
+  const {
+    knowledgeBase,
+    addToKnowledgeBase,
+    conversations,
+    addConversation,
+    clearConversations,
+    profileSummary,
+    selectedScenario,
+    templateContent,
+    addConversationSummary,
+    getRelevantSummaries,
+  } = useKnowledgeBase();
   const { error, setError, clearError } = useError();
   const {
     currentText,
@@ -45,6 +57,21 @@ const InterviewPage: React.FC = () => {
   const aiResponseRef = useRef<HTMLDivElement>(null);
   const [collapsedSegments, setCollapsedSegments] = useState<Record<string, boolean>>({});
   const wasNearBottomRef = useRef(true);
+
+  const knowledgeEntriesForPrompt = useMemo(() => {
+    const prioritizedCategories = [
+      KnowledgeCategory.ActionItem,
+      KnowledgeCategory.Feedback,
+      KnowledgeCategory.Document,
+      KnowledgeCategory.Profile,
+      KnowledgeCategory.General,
+    ];
+
+    return prioritizedCategories
+      .flatMap(category => (knowledgeBase[category] || []) as KnowledgeEntry[])
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .slice(0, 12);
+  }, [knowledgeBase]);
 
   const markdownStyles = `
     .markdown-body {
@@ -98,7 +125,7 @@ const InterviewPage: React.FC = () => {
       const config = await window.electronAPI.getConfig();
       
       // Build the system prompt using the prompt builder
-      let systemPrompt = buildInterviewPrompt(profileSummary, selectedScenario);
+      let systemPrompt = buildInterviewPrompt(profileSummary, selectedScenario, knowledgeBase);
       
       // Merge template content if available
       if (templateContent) {
@@ -123,9 +150,21 @@ const InterviewPage: React.FC = () => {
         });
       }
       
+      const knowledgeMessages: OpenAI.Chat.ChatCompletionMessageParam[] = knowledgeEntriesForPrompt.map(entry => {
+        if (entry.content.startsWith('data:image')) {
+          return {
+            role: "user" as const,
+            content: [{ type: "image_url", image_url: { url: entry.content } } as const],
+          } as OpenAI.Chat.ChatCompletionUserMessageParam;
+        }
+
+        const formattedContent = `[${entry.category.toUpperCase()} | confidence:${entry.confidence.toFixed(2)}] ${entry.content}`;
+        return { role: "user", content: formattedContent } as OpenAI.Chat.ChatCompletionUserMessageParam;
+      });
+
       const messages = [
         { role: "system", content: systemPrompt + conversationContext },
-        ...knowledgeBase.map(item => ({ role: "user", content: item })),
+        ...knowledgeMessages,
         // Only include recent conversations (last 5 exchanges) to avoid token limits
         ...conversations.slice(-10),
         { role: "user", content: contentToProcess }
@@ -160,12 +199,19 @@ const InterviewPage: React.FC = () => {
       
       // Generate conversation summary for long-term memory
       try {
-        const conversationSummary = await processConversationExchange(
+        const { conversationSummary, knowledgeCategory } = await processConversationExchange(
           contentToProcess,
           formattedResponse,
           conversations.slice(-6) // Include recent context
         );
         addConversationSummary(conversationSummary);
+        addToKnowledgeBase({
+          content: conversationSummary.summary,
+          category: knowledgeCategory,
+          tags: conversationSummary.tags,
+          confidence: 0.7,
+          relatedSummaryId: conversationSummary.id,
+        });
       } catch (summaryError) {
         console.error('Failed to generate conversation summary:', summaryError);
         // Don't fail the main conversation if summary generation fails

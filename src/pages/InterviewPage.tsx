@@ -17,6 +17,7 @@ import ConversationMemoryManager from "../components/ConversationMemoryManager";
 import ReactMarkdown from 'react-markdown';
 import { buildInterviewPrompt } from '../utils/promptBuilder';
 import { processConversationExchange } from '../services/conversationMemory';
+import TeleprompterViewer from "../components/TeleprompterViewer";
 
 const InterviewPage: React.FC = () => {
   const { knowledgeBase, conversations, addConversation, clearConversations, profileSummary, selectedScenario, templateContent, addConversationSummary, getRelevantSummaries } = useKnowledgeBase();
@@ -27,7 +28,11 @@ const InterviewPage: React.FC = () => {
     displayedAiResult,
     setDisplayedAiResult,
     lastProcessedIndex,
-    setLastProcessedIndex
+    setLastProcessedIndex,
+    autoScrollEnabled,
+    setAutoScrollEnabled,
+    teleprompterMode,
+    setTeleprompterMode,
   } = useInterview();
   const [isRecording, setIsRecording] = useState(false);
   const [isConfigured, setIsConfigured] = useState(false);
@@ -39,6 +44,7 @@ const InterviewPage: React.FC = () => {
   const [autoSubmitTimer, setAutoSubmitTimer] = useState<NodeJS.Timeout | null>(null);
   const aiResponseRef = useRef<HTMLDivElement>(null);
   const [collapsedSegments, setCollapsedSegments] = useState<Record<string, boolean>>({});
+  const wasNearBottomRef = useRef(true);
 
   const markdownStyles = `
     .markdown-body {
@@ -87,6 +93,7 @@ const InterviewPage: React.FC = () => {
     if (!contentToProcess) return;
 
     setIsLoading(true);
+    const shouldAutoScroll = autoScrollEnabled && wasNearBottomRef.current;
     try {
       const config = await window.electronAPI.getConfig();
       
@@ -168,7 +175,19 @@ const InterviewPage: React.FC = () => {
     } finally {
       setIsLoading(false);
       if (aiResponseRef.current) {
-        aiResponseRef.current.scrollTop = aiResponseRef.current.scrollHeight;
+        requestAnimationFrame(() => {
+          const container = aiResponseRef.current;
+          if (!container) {
+            return;
+          }
+          if (shouldAutoScroll) {
+            container.scrollTop = container.scrollHeight;
+            wasNearBottomRef.current = true;
+          } else {
+            const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+            wasNearBottomRef.current = distanceFromBottom <= 40;
+          }
+        });
       }
     }
   };
@@ -314,10 +333,42 @@ const InterviewPage: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    if (aiResponseRef.current) {
-      aiResponseRef.current.scrollTop = aiResponseRef.current.scrollHeight;
+    const shouldAutoScroll = autoScrollEnabled && wasNearBottomRef.current;
+    if (!aiResponseRef.current) {
+      return;
     }
-  }, [displayedAiResult]);
+    requestAnimationFrame(() => {
+      const container = aiResponseRef.current;
+      if (!container) {
+        return;
+      }
+      if (shouldAutoScroll) {
+        container.scrollTop = container.scrollHeight;
+        wasNearBottomRef.current = true;
+      } else {
+        const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+        wasNearBottomRef.current = distanceFromBottom <= 40;
+      }
+    });
+  }, [displayedAiResult, autoScrollEnabled]);
+
+  useEffect(() => {
+    const container = aiResponseRef.current;
+    if (!container) {
+      return;
+    }
+
+    const handleScroll = () => {
+      const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+      wasNearBottomRef.current = distanceFromBottom <= 40;
+    };
+
+    container.addEventListener('scroll', handleScroll);
+    handleScroll();
+    return () => {
+      container.removeEventListener('scroll', handleScroll);
+    };
+  }, []);
 
   const handleCopySegment = async (segment: ResponseSegment) => {
     try {
@@ -387,12 +438,33 @@ const InterviewPage: React.FC = () => {
             Clear Content
           </button>
         </div>
-        <div className="flex-1 flex flex-col bg-base-200 p-2 rounded-lg">
+        <div className="flex-1 flex flex-col bg-base-200 p-2 rounded-lg relative">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <h2 className="text-lg font-bold">AI Response:</h2>
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <label className="flex items-center gap-1">
+                <input
+                  type="checkbox"
+                  className="checkbox checkbox-xs"
+                  checked={autoScrollEnabled}
+                  onChange={(event) => setAutoScrollEnabled(event.target.checked)}
+                />
+                <span>Auto-scroll</span>
+              </label>
+              <button
+                className="btn btn-ghost btn-xs"
+                onClick={() => setTeleprompterMode(true)}
+                type="button"
+                disabled={displayedAiResult.length === 0}
+              >
+                Teleprompter
+              </button>
+            </div>
+          </div>
           <div
             ref={aiResponseRef}
             className="flex-1 overflow-auto bg-base-100 p-2 rounded mb-1 min-h-[80px]"
           >
-            <h2 className="text-lg font-bold mb-1">AI Response:</h2>
             <div className="space-y-1">
               {displayedAiResult.map(segment => {
                 const isCollapsed = collapsedSegments[segment.id];
@@ -458,6 +530,12 @@ const InterviewPage: React.FC = () => {
           </div>
         </div>
       </div>
+      {teleprompterMode && (
+        <TeleprompterViewer
+          segments={displayedAiResult}
+          onClose={() => setTeleprompterMode(false)}
+        />
+      )}
     </div>
   );
 };

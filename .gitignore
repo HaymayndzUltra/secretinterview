@@ -93,4 +93,8 @@ out/
 
 # Electron
 **/node_modules/electron/**
-whisper/models/*.bin
+
+# Whisper files - large binary files that shouldn't be committed
+whisper/
+whisper/**
+!whisper/.gitkeep

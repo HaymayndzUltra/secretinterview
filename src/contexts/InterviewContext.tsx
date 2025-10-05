@@ -1,12 +1,20 @@
 import React, { createContext, useState, useContext, ReactNode } from 'react';
 
+export interface ResponseSegment {
+  id: string;
+  text: string;
+  metadata?: {
+    timestamp: number;
+  };
+}
+
 interface InterviewContextType {
   currentText: string;
   setCurrentText: React.Dispatch<React.SetStateAction<string>>;
   aiResult: string;
   setAiResult: React.Dispatch<React.SetStateAction<string>>;
-  displayedAiResult: string;
-  setDisplayedAiResult: React.Dispatch<React.SetStateAction<string>>;
+  displayedAiResult: ResponseSegment[];
+  setDisplayedAiResult: React.Dispatch<React.SetStateAction<ResponseSegment[]>>;
   lastProcessedIndex: number;
   setLastProcessedIndex: React.Dispatch<React.SetStateAction<number>>;
 }
@@ -16,7 +24,7 @@ const InterviewContext = createContext<InterviewContextType | undefined>(undefin
 export const InterviewProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [currentText, setCurrentText] = useState("");
   const [aiResult, setAiResult] = useState("");
-  const [displayedAiResult, setDisplayedAiResult] = useState("");
+  const [displayedAiResult, setDisplayedAiResult] = useState<ResponseSegment[]>([]);
   const [lastProcessedIndex, setLastProcessedIndex] = useState(0);
 
   return (

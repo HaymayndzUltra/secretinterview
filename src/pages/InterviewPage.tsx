@@ -11,7 +11,7 @@ import Timer from "../components/Timer";
 import { useKnowledgeBase } from "../contexts/KnowledgeBaseContext";
 import ErrorDisplay from "../components/ErrorDisplay";
 import { useError } from "../contexts/ErrorContext";
-import { useInterview } from "../contexts/InterviewContext";
+import { ResponseSegment, useInterview } from "../contexts/InterviewContext";
 import TemplateSelector from "../components/TemplateSelector";
 import ConversationMemoryManager from "../components/ConversationMemoryManager";
 import ReactMarkdown from 'react-markdown';
@@ -24,8 +24,6 @@ const InterviewPage: React.FC = () => {
   const {
     currentText,
     setCurrentText,
-    aiResult,
-    setAiResult,
     displayedAiResult,
     setDisplayedAiResult,
     lastProcessedIndex,
@@ -40,6 +38,7 @@ const InterviewPage: React.FC = () => {
   const [processor, setProcessor] = useState<ScriptProcessorNode | null>(null);
   const [autoSubmitTimer, setAutoSubmitTimer] = useState<NodeJS.Timeout | null>(null);
   const aiResponseRef = useRef<HTMLDivElement>(null);
+  const [collapsedSegments, setCollapsedSegments] = useState<Record<string, boolean>>({});
 
   const markdownStyles = `
     .markdown-body {
@@ -47,7 +46,7 @@ const InterviewPage: React.FC = () => {
       line-height: 1.2;
     }
     .markdown-body p {
-      margin-bottom: 4px;
+      margin-bottom: 2px;
     }
     .markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4, .markdown-body h5, .markdown-body h6 {
       margin-top: 8px;
@@ -137,7 +136,19 @@ const InterviewPage: React.FC = () => {
       const formattedResponse = response.content.trim();
       addConversation({ role: "user", content: contentToProcess });
       addConversation({ role: "assistant", content: formattedResponse });
-      setDisplayedAiResult(prev => prev + (prev ? '\n\n' : '') + formattedResponse);
+      const newSegment: ResponseSegment = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        text: formattedResponse,
+        metadata: {
+          timestamp: Date.now(),
+        },
+      };
+      setDisplayedAiResult(prev => [...prev, newSegment]);
+      setCollapsedSegments(prev => {
+        const updated = { ...prev };
+        delete updated[newSegment.id];
+        return updated;
+      });
       setLastProcessedIndex(currentText.length);
       
       // Generate conversation summary for long-term memory
@@ -308,6 +319,21 @@ const InterviewPage: React.FC = () => {
     }
   }, [displayedAiResult]);
 
+  const handleCopySegment = async (segment: ResponseSegment) => {
+    try {
+      await navigator.clipboard.writeText(segment.text);
+    } catch (copyError) {
+      console.error('Failed to copy segment', copyError);
+    }
+  };
+
+  const toggleSegmentCollapsed = (segmentId: string) => {
+    setCollapsedSegments(prev => ({
+      ...prev,
+      [segmentId]: !prev[segmentId],
+    }));
+  };
+
   const debounce = (func: Function, delay: number) => {
     let timeoutId: NodeJS.Timeout;
     return (...args: any[]) => {
@@ -362,16 +388,58 @@ const InterviewPage: React.FC = () => {
           </button>
         </div>
         <div className="flex-1 flex flex-col bg-base-200 p-2 rounded-lg">
-          <div 
+          <div
             ref={aiResponseRef}
             className="flex-1 overflow-auto bg-base-100 p-2 rounded mb-1 min-h-[80px]"
           >
             <h2 className="text-lg font-bold mb-1">AI Response:</h2>
-            <ReactMarkdown className="whitespace-pre-wrap markdown-body" components={{
-              p: ({node, ...props}) => <p style={{whiteSpace: 'pre-wrap'}} {...props} />
-            }}>
-              {displayedAiResult}
-            </ReactMarkdown>
+            <div className="space-y-1">
+              {displayedAiResult.map(segment => {
+                const isCollapsed = collapsedSegments[segment.id];
+                return (
+                  <div
+                    key={segment.id}
+                    className="rounded border border-base-300 bg-base-200/60 p-2 shadow-sm"
+                  >
+                    <div className="mb-1 flex items-start justify-between gap-2 text-xs text-base-content/70">
+                      <span>
+                        {segment.metadata?.timestamp
+                          ? new Date(segment.metadata.timestamp).toLocaleTimeString()
+                          : 'Assistant'}
+                      </span>
+                      <div className="flex gap-1">
+                        <button
+                          onClick={() => handleCopySegment(segment)}
+                          className="btn btn-ghost btn-xs"
+                          type="button"
+                        >
+                          Copy
+                        </button>
+                        <button
+                          onClick={() => toggleSegmentCollapsed(segment.id)}
+                          className="btn btn-ghost btn-xs"
+                          type="button"
+                        >
+                          {isCollapsed ? 'Expand' : 'Collapse'}
+                        </button>
+                      </div>
+                    </div>
+                    {!isCollapsed && (
+                      <ReactMarkdown
+                        className="markdown-body whitespace-pre-wrap"
+                        components={{
+                          p: ({ node, ...props }) => (
+                            <p style={{ whiteSpace: 'pre-wrap' }} {...props} />
+                          ),
+                        }}
+                      >
+                        {segment.text}
+                      </ReactMarkdown>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           </div>
           <div className="flex justify-between mt-1">
             <button
@@ -382,7 +450,8 @@ const InterviewPage: React.FC = () => {
               {isLoading ? "Loading..." : "Ask GPT"}
             </button>
             <button onClick={() => {
-              setDisplayedAiResult("");
+              setDisplayedAiResult([]);
+              setCollapsedSegments({});
             }} className="btn btn-ghost">
               Clear AI Result
             </button>

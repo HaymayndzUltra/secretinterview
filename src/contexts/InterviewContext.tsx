@@ -17,6 +17,10 @@ interface InterviewContextType {
   setDisplayedAiResult: React.Dispatch<React.SetStateAction<ResponseSegment[]>>;
   lastProcessedIndex: number;
   setLastProcessedIndex: React.Dispatch<React.SetStateAction<number>>;
+  autoScrollEnabled: boolean;
+  setAutoScrollEnabled: React.Dispatch<React.SetStateAction<boolean>>;
+  teleprompterMode: boolean;
+  setTeleprompterMode: React.Dispatch<React.SetStateAction<boolean>>;
 }
 
 const InterviewContext = createContext<InterviewContextType | undefined>(undefined);
@@ -26,6 +30,27 @@ export const InterviewProvider: React.FC<{ children: ReactNode }> = ({ children 
   const [aiResult, setAiResult] = useState("");
   const [displayedAiResult, setDisplayedAiResult] = useState<ResponseSegment[]>([]);
   const [lastProcessedIndex, setLastProcessedIndex] = useState(0);
+  const [autoScrollEnabled, setAutoScrollEnabled] = useState<boolean>(() => {
+    try {
+      const storedValue = localStorage.getItem('interview-auto-scroll');
+      if (storedValue === null) {
+        return true;
+      }
+      return storedValue === 'true';
+    } catch (error) {
+      console.warn('Failed to read auto scroll preference', error);
+      return true;
+    }
+  });
+  const [teleprompterMode, setTeleprompterMode] = useState(false);
+
+  React.useEffect(() => {
+    try {
+      localStorage.setItem('interview-auto-scroll', String(autoScrollEnabled));
+    } catch (error) {
+      console.warn('Failed to persist auto scroll preference', error);
+    }
+  }, [autoScrollEnabled]);
 
   return (
     <InterviewContext.Provider
@@ -38,6 +63,10 @@ export const InterviewProvider: React.FC<{ children: ReactNode }> = ({ children 
         setDisplayedAiResult,
         lastProcessedIndex,
         setLastProcessedIndex,
+        autoScrollEnabled,
+        setAutoScrollEnabled,
+        teleprompterMode,
+        setTeleprompterMode,
       }}
     >
       {children}

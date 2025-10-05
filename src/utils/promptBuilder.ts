@@ -1,4 +1,4 @@
-import { ProfileSummary } from '../contexts/KnowledgeBaseContext';
+import { KnowledgeCategory, KnowledgeEntry, ProfileSummary } from '../contexts/KnowledgeBaseContext';
 
 export interface InterviewScenario {
   id: string;
@@ -90,7 +90,8 @@ export const INTERVIEW_SCENARIOS: InterviewScenario[] = [
  */
 export function buildInterviewPrompt(
   profileSummary: ProfileSummary | null,
-  scenario: InterviewScenario
+  scenario: InterviewScenario,
+  knowledgeBase?: Record<KnowledgeCategory, KnowledgeEntry[]>
 ): string {
   let prompt = `${scenario.systemPrompt}\n\n`;
 
@@ -135,6 +136,28 @@ export function buildInterviewPrompt(
   prompt += `- Suggest follow-up questions\n`;
   prompt += `- Offer insights on the candidate's responses\n`;
   prompt += `- Maintain consistency with the interview scenario focus\n`;
+
+  if (knowledgeBase) {
+    const appendSection = (title: string, entries?: KnowledgeEntry[], limit: number = 5) => {
+      if (!entries || entries.length === 0) {
+        return;
+      }
+
+      prompt += `\n## ${title}\n\n`;
+      entries.slice(0, limit).forEach((entry, index) => {
+        prompt += `${index + 1}. ${entry.content}\n`;
+        if (entry.tags.length > 0) {
+          prompt += `   - Tags: ${entry.tags.join(', ')}\n`;
+        }
+        prompt += `   - Confidence: ${(entry.confidence * 100).toFixed(0)}%\n`;
+      });
+    };
+
+    appendSection('Candidate Profile Highlights', knowledgeBase[KnowledgeCategory.Profile]);
+    appendSection('Supporting Documents', knowledgeBase[KnowledgeCategory.Document], 3);
+    appendSection('Follow-up Action Items', knowledgeBase[KnowledgeCategory.ActionItem], 3);
+    appendSection('Feedback Insights', knowledgeBase[KnowledgeCategory.Feedback], 3);
+  }
 
   return prompt;
 }

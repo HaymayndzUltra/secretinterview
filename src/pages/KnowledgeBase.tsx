@@ -1,5 +1,5 @@
-import React, { useState, useRef } from 'react';
-import { useKnowledgeBase, ProfileSummary } from '../contexts/KnowledgeBaseContext';
+import React, { useMemo, useState, useRef } from 'react';
+import { useKnowledgeBase, ProfileSummary, KnowledgeCategory, KnowledgeEntry } from '../contexts/KnowledgeBaseContext';
 import { useError } from '../contexts/ErrorContext';
 import ErrorDisplay from '../components/ErrorDisplay';
 import ProfileSummaryCard from '../components/ProfileSummaryCard';
@@ -19,9 +19,10 @@ interface UploadedFile extends File {
 
 const KnowledgeBase: React.FC = () => {
   const { 
-    knowledgeBase, 
-    addToKnowledgeBase, 
-    conversations, 
+    knowledgeBase,
+    addToKnowledgeBase,
+    deleteKnowledgeEntry,
+    conversations,
     addConversation, 
     clearConversations,
     displayedAiResult,
@@ -38,6 +39,68 @@ const KnowledgeBase: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
+  const [selectedKnowledgeCategory, setSelectedKnowledgeCategory] = useState<KnowledgeCategory>(KnowledgeCategory.Profile);
+
+  const categorizedKnowledgeEntries = useMemo(() => {
+    const base = Object.values(KnowledgeCategory).reduce((acc, category) => {
+      acc[category] = [] as KnowledgeEntry[];
+      return acc;
+    }, {} as Record<KnowledgeCategory, KnowledgeEntry[]>);
+
+    Object.values(KnowledgeCategory).forEach(category => {
+      base[category] = [...(knowledgeBase[category] || [])].sort((a, b) => b.updatedAt - a.updatedAt);
+    });
+
+    return base;
+  }, [knowledgeBase]);
+
+  const knowledgeEntriesForPrompt = useMemo(() => {
+    const prioritizedCategories = [
+      KnowledgeCategory.ActionItem,
+      KnowledgeCategory.Feedback,
+      KnowledgeCategory.Document,
+      KnowledgeCategory.Profile,
+      KnowledgeCategory.General,
+    ];
+
+    return prioritizedCategories
+      .flatMap(category => categorizedKnowledgeEntries[category] || [])
+      .slice(0, 12);
+  }, [categorizedKnowledgeEntries]);
+
+  const handleExportKnowledge = (category: KnowledgeCategory) => {
+    const entries = categorizedKnowledgeEntries[category] || [];
+    if (entries.length === 0) {
+      return;
+    }
+
+    const exportPayload = entries.map(entry => ({
+      id: entry.id,
+      content: entry.content,
+      tags: entry.tags,
+      createdAt: entry.createdAt,
+      updatedAt: entry.updatedAt,
+      confidence: entry.confidence,
+    }));
+
+    const blob = new Blob([JSON.stringify(exportPayload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `knowledge-${category}-${new Date().toISOString()}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleDeleteKnowledgeEntry = (id: string) => {
+    if (window.confirm('Are you sure you want to remove this knowledge entry?')) {
+      deleteKnowledgeEntry(id);
+    }
+  };
+
+  const formatTimestamp = (timestamp: number) => new Date(timestamp).toLocaleString();
+
+  const selectedKnowledgeEntries = categorizedKnowledgeEntries[selectedKnowledgeCategory] || [];
 
   const markdownStyles = `
     .markdown-body {
@@ -145,7 +208,7 @@ const KnowledgeBase: React.FC = () => {
       const config = await window.electronAPI.getConfig();
       
       // Build the system prompt using the prompt builder
-      let systemPrompt = buildInterviewPrompt(profileSummary, selectedScenario);
+      let systemPrompt = buildInterviewPrompt(profileSummary, selectedScenario, knowledgeBase);
       
       // Merge template content if available
       if (templateContent) {
@@ -170,17 +233,21 @@ const KnowledgeBase: React.FC = () => {
         });
       }
       
+      const knowledgeMessages: OpenAI.Chat.ChatCompletionMessageParam[] = knowledgeEntriesForPrompt.map(entry => {
+        if (entry.content.startsWith('data:image')) {
+          return {
+            role: "user",
+            content: [{ type: "image_url", image_url: { url: entry.content } } as const],
+          } as OpenAI.Chat.ChatCompletionUserMessageParam;
+        }
+
+        const formattedContent = `[${entry.category.toUpperCase()} | confidence:${entry.confidence.toFixed(2)}] ${entry.content}`;
+        return { role: "user", content: formattedContent } as OpenAI.Chat.ChatCompletionUserMessageParam;
+      });
+
       const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
         { role: "system", content: systemPrompt + conversationContext },
-        ...knowledgeBase.map(item => {
-          if (item.startsWith('data:image')) {
-            return {
-              role: "user",
-              content: [{ type: "image_url", image_url: { url: item } } as const]
-            } as OpenAI.Chat.ChatCompletionUserMessageParam;
-          }
-          return { role: "user", content: item } as OpenAI.Chat.ChatCompletionUserMessageParam;
-        }),
+        ...knowledgeMessages,
         // Only include recent conversations (last 5 exchanges) to avoid token limits
         ...conversations.slice(-10).map(conv => ({
           role: conv.role,
@@ -224,12 +291,19 @@ const KnowledgeBase: React.FC = () => {
       
       // Generate conversation summary for long-term memory
       try {
-        const conversationSummary = await processConversationExchange(
+        const { conversationSummary, knowledgeCategory } = await processConversationExchange(
           userMessage,
           response.content,
           conversations.slice(-6) // Include recent context
         );
         addConversationSummary(conversationSummary);
+        addToKnowledgeBase({
+          content: conversationSummary.summary,
+          category: knowledgeCategory,
+          tags: conversationSummary.tags,
+          confidence: 0.7,
+          relatedSummaryId: conversationSummary.id,
+        });
       } catch (summaryError) {
         console.error('Failed to generate conversation summary:', summaryError);
         // Don't fail the main conversation if summary generation fails
@@ -317,11 +391,21 @@ const KnowledgeBase: React.FC = () => {
               setProfileSummary(extractionResult.profileSummary);
               
               // Also add the raw content to knowledge base for traceability
-              addToKnowledgeBase(`[Profile Document] ${textFiles.map(f => f.name).join(', ')}\n\n${combinedTextContent}`);
+              addToKnowledgeBase({
+                content: `[Profile Document] ${textFiles.map(f => f.name).join(', ')}\n\n${combinedTextContent}`,
+                category: KnowledgeCategory.Profile,
+                tags: ['profile', 'document'],
+                confidence: 0.9,
+              });
             } else {
               console.warn('Profile extraction failed:', extractionResult.error);
               // Still add raw content to knowledge base even if extraction fails
-              addToKnowledgeBase(`[Document] ${textFiles.map(f => f.name).join(', ')}\n\n${combinedTextContent}`);
+              addToKnowledgeBase({
+                content: `[Document] ${textFiles.map(f => f.name).join(', ')}\n\n${combinedTextContent}`,
+                category: KnowledgeCategory.Document,
+                tags: textFiles.map(f => f.name),
+                confidence: 0.6,
+              });
             }
           }
         } catch (error) {
@@ -349,7 +433,76 @@ const KnowledgeBase: React.FC = () => {
         onUpdateProfile={handleUpdateProfile}
         onClearProfile={handleClearProfile}
       />
-      
+
+      {/* Knowledge Base Overview */}
+      <div className="card bg-base-100 shadow-md mb-4">
+        <div className="card-body p-4 space-y-3">
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+            <div>
+              <h2 className="card-title text-lg">Knowledge Base Entries</h2>
+              <p className="text-sm text-base-content/70">Filter, review, and export saved knowledge snippets.</p>
+            </div>
+            <div className="flex flex-col sm:flex-row gap-2">
+              <select
+                className="select select-bordered select-sm"
+                value={selectedKnowledgeCategory}
+                onChange={(event) => setSelectedKnowledgeCategory(event.target.value as KnowledgeCategory)}
+              >
+                {Object.values(KnowledgeCategory).map(category => (
+                  <option key={category} value={category}>
+                    {category.replace('_', ' ').toUpperCase()}
+                  </option>
+                ))}
+              </select>
+              <button
+                className="btn btn-sm btn-outline"
+                onClick={() => handleExportKnowledge(selectedKnowledgeCategory)}
+                disabled={selectedKnowledgeEntries.length === 0}
+              >
+                Export
+              </button>
+            </div>
+          </div>
+
+          {selectedKnowledgeEntries.length === 0 ? (
+            <div className="text-sm text-base-content/60">
+              No entries available for this category yet.
+            </div>
+          ) : (
+            <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+              {selectedKnowledgeEntries.map(entry => (
+                <div key={entry.id} className="border border-base-300 rounded-lg p-3">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="space-y-1">
+                      <div className="text-xs text-base-content/60">
+                        Updated {formatTimestamp(entry.updatedAt)}
+                      </div>
+                      <p className="text-sm whitespace-pre-wrap">{entry.content}</p>
+                      {entry.tags.length > 0 && (
+                        <div className="flex flex-wrap gap-1">
+                          {entry.tags.map(tag => (
+                            <span key={tag} className="badge badge-outline badge-xs">{tag}</span>
+                          ))}
+                        </div>
+                      )}
+                      <div className="text-xs text-base-content/60">
+                        Confidence: {(entry.confidence * 100).toFixed(0)}%
+                      </div>
+                    </div>
+                    <button
+                      className="btn btn-xs btn-ghost"
+                      onClick={() => handleDeleteKnowledgeEntry(entry.id)}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
       {/* Conversation Memory Manager */}
       <ConversationMemoryManager className="mb-4" />
       <div className="flex-1 overflow-auto mb-4 border-2 border-gray-300 rounded-lg p-4 bg-base-100 shadow-md">

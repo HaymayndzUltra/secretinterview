@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { useKnowledgeBase, ConversationSummary } from '../contexts/KnowledgeBaseContext';
+import React, { useMemo, useState } from 'react';
+import { useKnowledgeBase, ConversationSummary, KnowledgeCategory } from '../contexts/KnowledgeBaseContext';
 import { FaThumbtack, FaTrash, FaEye, FaEyeSlash } from 'react-icons/fa';
 
 interface ConversationMemoryManagerProps {
@@ -13,20 +13,51 @@ const ConversationMemoryManager: React.FC<ConversationMemoryManagerProps> = ({ c
     deleteConversationSummary,
     clearConversationSummaries
   } = useKnowledgeBase();
-  
+
   const [isExpanded, setIsExpanded] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [filterPinned, setFilterPinned] = useState(false);
+  const [selectedCategory, setSelectedCategory] = useState<KnowledgeCategory | 'all'>('all');
 
-  const filteredSummaries = conversationSummaries.filter(summary => {
-    const matchesSearch = searchQuery === '' || 
+  const sortedSummaries = useMemo(() => {
+    return [...conversationSummaries].sort((a, b) => b.timestamp - a.timestamp);
+  }, [conversationSummaries]);
+
+  const filteredSummaries = sortedSummaries.filter(summary => {
+    const matchesSearch = searchQuery === '' ||
       summary.summary.toLowerCase().includes(searchQuery.toLowerCase()) ||
       summary.tags.some(tag => tag.toLowerCase().includes(searchQuery.toLowerCase()));
-    
+
     const matchesPinned = !filterPinned || summary.pinned;
-    
-    return matchesSearch && matchesPinned;
+
+    const matchesCategory = selectedCategory === 'all' || summary.category === selectedCategory;
+
+    return matchesSearch && matchesPinned && matchesCategory;
   });
+
+  const handleExport = () => {
+    if (filteredSummaries.length === 0) {
+      return;
+    }
+
+    const payload = filteredSummaries.map(summary => ({
+      id: summary.id,
+      summary: summary.summary,
+      tags: summary.tags,
+      timestamp: summary.timestamp,
+      pinned: summary.pinned,
+      category: summary.category,
+      context: summary.conversationContext,
+    }));
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `conversation-summaries-${selectedCategory}-${Date.now()}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
 
   const handleTogglePin = (id: string, pinned: boolean) => {
     updateConversationSummary(id, { pinned: !pinned });
@@ -55,7 +86,26 @@ const ConversationMemoryManager: React.FC<ConversationMemoryManagerProps> = ({ c
           <h3 className="card-title text-lg">
             Conversation Memory ({conversationSummaries.length})
           </h3>
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-wrap justify-end">
+            <select
+              className="select select-bordered select-xs"
+              value={selectedCategory}
+              onChange={(event) => setSelectedCategory(event.target.value as KnowledgeCategory | 'all')}
+            >
+              <option value="all">ALL</option>
+              {Object.values(KnowledgeCategory).map(category => (
+                <option key={category} value={category}>
+                  {category.replace('_', ' ').toUpperCase()}
+                </option>
+              ))}
+            </select>
+            <button
+              onClick={handleExport}
+              className="btn btn-xs"
+              disabled={filteredSummaries.length === 0}
+            >
+              Export
+            </button>
             <button
               onClick={() => setIsExpanded(!isExpanded)}
               className="btn btn-sm btn-ghost"
@@ -116,14 +166,17 @@ const ConversationMemoryManager: React.FC<ConversationMemoryManagerProps> = ({ c
                   >
                     <div className="flex items-start justify-between mb-2">
                       <div className="flex-1">
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className="text-xs text-base-content/60">
-                            {formatDate(summary.timestamp)}
-                          </span>
-                          {summary.pinned && (
-                            <span className="badge badge-primary badge-xs">Pinned</span>
-                          )}
-                        </div>
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-xs text-base-content/60">
+                          {formatDate(summary.timestamp)}
+                        </span>
+                        <span className="badge badge-ghost badge-xs">
+                          {summary.category.replace('_', ' ').toUpperCase()}
+                        </span>
+                        {summary.pinned && (
+                          <span className="badge badge-primary badge-xs">Pinned</span>
+                        )}
+                      </div>
                         <p className="text-sm mb-2">{summary.summary}</p>
                         <div className="flex flex-wrap gap-1">
                           {summary.tags.map((tag, index) => (

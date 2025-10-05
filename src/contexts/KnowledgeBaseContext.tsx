@@ -1,6 +1,26 @@
 import React, { createContext, useState, useContext, ReactNode, useEffect } from 'react';
 import { InterviewScenario, getScenarioById } from '../utils/promptBuilder';
 
+export enum KnowledgeCategory {
+  Profile = 'profile',
+  Document = 'document',
+  Conversation = 'conversation',
+  ActionItem = 'action_item',
+  Feedback = 'feedback',
+  General = 'general',
+}
+
+export interface KnowledgeEntry {
+  id: string;
+  content: string;
+  category: KnowledgeCategory;
+  tags: string[];
+  createdAt: number;
+  updatedAt: number;
+  confidence: number;
+  relatedSummaryId?: string;
+}
+
 interface Conversation {
   role: string;
   content: string;
@@ -20,6 +40,7 @@ export interface ConversationSummary {
   tags: string[];
   embedding?: number[];
   pinned: boolean;
+  category: KnowledgeCategory;
   conversationContext: {
     userMessage: string;
     assistantResponse: string;
@@ -32,9 +53,17 @@ interface PromptTemplate {
 }
 
 interface KnowledgeBaseContextType {
-  knowledgeBase: string[];
-  addToKnowledgeBase: (content: string) => void;
-  setKnowledgeBase: (knowledgeBase: string[]) => void;
+  knowledgeBase: Record<KnowledgeCategory, KnowledgeEntry[]>;
+  addToKnowledgeBase: (entry: {
+    content: string;
+    category?: KnowledgeCategory;
+    tags?: string[];
+    confidence?: number;
+    relatedSummaryId?: string;
+  }) => KnowledgeEntry;
+  updateKnowledgeEntry: (id: string, updates: Partial<Omit<KnowledgeEntry, 'id'>>) => void;
+  deleteKnowledgeEntry: (id: string) => void;
+  setKnowledgeBase: (knowledgeBase: Record<KnowledgeCategory, KnowledgeEntry[]>) => void;
   conversations: Conversation[];
   addConversation: (conversation: Conversation) => void;
   clearConversations: () => void;
@@ -63,7 +92,16 @@ interface KnowledgeBaseContextType {
 const KnowledgeBaseContext = createContext<KnowledgeBaseContextType | undefined>(undefined);
 
 export const KnowledgeBaseProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-  const [knowledgeBase, setKnowledgeBase] = useState<string[]>([]);
+  const createEmptyKnowledgeBase = () => ({
+    [KnowledgeCategory.Profile]: [] as KnowledgeEntry[],
+    [KnowledgeCategory.Document]: [] as KnowledgeEntry[],
+    [KnowledgeCategory.Conversation]: [] as KnowledgeEntry[],
+    [KnowledgeCategory.ActionItem]: [] as KnowledgeEntry[],
+    [KnowledgeCategory.Feedback]: [] as KnowledgeEntry[],
+    [KnowledgeCategory.General]: [] as KnowledgeEntry[],
+  });
+
+  const [knowledgeBase, setKnowledgeBaseState] = useState<Record<KnowledgeCategory, KnowledgeEntry[]>>(createEmptyKnowledgeBase());
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [displayedAiResult, setDisplayedAiResult] = useState("");
   const [profileSummary, setProfileSummary] = useState<ProfileSummary | null>(null);
@@ -83,7 +121,47 @@ export const KnowledgeBaseProvider: React.FC<{ children: ReactNode }> = ({ child
     const savedConversationSummaries = localStorage.getItem('conversationSummaries');
     
     if (savedKnowledgeBase) {
-      setKnowledgeBase(JSON.parse(savedKnowledgeBase));
+      try {
+        const parsed = JSON.parse(savedKnowledgeBase);
+        if (Array.isArray(parsed)) {
+          const migrated = createEmptyKnowledgeBase();
+          parsed.forEach((item: string, index: number) => {
+            const now = Date.now() + index;
+            migrated[KnowledgeCategory.General].push({
+              id: `legacy_${now}_${Math.random().toString(36).slice(2, 8)}`,
+              content: item,
+              category: KnowledgeCategory.General,
+              tags: [],
+              createdAt: now,
+              updatedAt: now,
+              confidence: 0.5,
+            });
+          });
+          setKnowledgeBaseState(migrated);
+        } else if (parsed && typeof parsed === 'object') {
+          const normalized = createEmptyKnowledgeBase();
+          Object.values(KnowledgeCategory).forEach(category => {
+            if (parsed[category] && Array.isArray(parsed[category])) {
+              normalized[category] = parsed[category].map((entry: any) => ({
+                id: entry.id || `entry_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+                content: entry.content || '',
+                category: entry.category || category,
+                tags: Array.isArray(entry.tags) ? entry.tags : [],
+                createdAt: entry.createdAt || Date.now(),
+                updatedAt: entry.updatedAt || entry.createdAt || Date.now(),
+                confidence: typeof entry.confidence === 'number' ? entry.confidence : 0.5,
+                relatedSummaryId: entry.relatedSummaryId,
+              }));
+            }
+          });
+          setKnowledgeBaseState(normalized);
+        } else {
+          setKnowledgeBaseState(createEmptyKnowledgeBase());
+        }
+      } catch (error) {
+        console.error('Failed to parse knowledge base data:', error);
+        setKnowledgeBaseState(createEmptyKnowledgeBase());
+      }
     }
     if (savedConversations) {
       setConversations(JSON.parse(savedConversations));
@@ -101,7 +179,17 @@ export const KnowledgeBaseProvider: React.FC<{ children: ReactNode }> = ({ child
       setTemplateContent(savedTemplateContent);
     }
     if (savedConversationSummaries) {
-      setConversationSummaries(JSON.parse(savedConversationSummaries));
+      try {
+        const parsedSummaries = JSON.parse(savedConversationSummaries);
+        if (Array.isArray(parsedSummaries)) {
+          setConversationSummaries(parsedSummaries.map((summary: any) => ({
+            ...summary,
+            category: summary.category || KnowledgeCategory.Conversation,
+          })));
+        }
+      } catch (error) {
+        console.error('Failed to parse conversation summaries:', error);
+      }
     }
     
     // Load available templates on startup
@@ -140,8 +228,97 @@ export const KnowledgeBaseProvider: React.FC<{ children: ReactNode }> = ({ child
     localStorage.setItem('conversationSummaries', JSON.stringify(conversationSummaries));
   }, [conversationSummaries]);
 
-  const addToKnowledgeBase = (content: string) => {
-    setKnowledgeBase(prev => [...prev, content]);
+  const addToKnowledgeBase = ({
+    content,
+    category = KnowledgeCategory.General,
+    tags = [],
+    confidence = 0.5,
+    relatedSummaryId,
+  }: {
+    content: string;
+    category?: KnowledgeCategory;
+    tags?: string[];
+    confidence?: number;
+    relatedSummaryId?: string;
+  }): KnowledgeEntry => {
+    const now = Date.now();
+    const entry: KnowledgeEntry = {
+      id: `knowledge_${now}_${Math.random().toString(36).slice(2, 10)}`,
+      content,
+      category,
+      tags,
+      createdAt: now,
+      updatedAt: now,
+      confidence,
+      relatedSummaryId,
+    };
+
+    setKnowledgeBaseState(prev => ({
+      ...prev,
+      [category]: [...prev[category], entry],
+    }));
+
+    return entry;
+  };
+
+  const updateKnowledgeEntry = (id: string, updates: Partial<Omit<KnowledgeEntry, 'id'>>) => {
+    setKnowledgeBaseState(prev => {
+      let locatedCategory: KnowledgeCategory | null = null;
+      let existingEntry: KnowledgeEntry | undefined;
+
+      for (const category of Object.values(KnowledgeCategory)) {
+        const found = prev[category].find(entry => entry.id === id);
+        if (found) {
+          locatedCategory = category;
+          existingEntry = found;
+          break;
+        }
+      }
+
+      if (!existingEntry || !locatedCategory) {
+        return prev;
+      }
+
+      const targetCategory = updates.category ?? locatedCategory;
+      const updatedEntry: KnowledgeEntry = {
+        ...existingEntry,
+        ...updates,
+        category: targetCategory,
+        updatedAt: Date.now(),
+      };
+
+      const newState = { ...prev } as Record<KnowledgeCategory, KnowledgeEntry[]>;
+      newState[locatedCategory] = prev[locatedCategory].filter(entry => entry.id !== id);
+      newState[targetCategory] = [...prev[targetCategory], updatedEntry];
+
+      return newState;
+    });
+  };
+
+  const deleteKnowledgeEntry = (id: string) => {
+    setKnowledgeBaseState(prev => {
+      const newState = { ...prev } as Record<KnowledgeCategory, KnowledgeEntry[]>;
+      for (const category of Object.values(KnowledgeCategory)) {
+        const entries = prev[category];
+        if (entries.some(entry => entry.id === id)) {
+          newState[category] = entries.filter(entry => entry.id !== id);
+        }
+      }
+      return newState;
+    });
+  };
+
+  const setKnowledgeBase = (next: Record<KnowledgeCategory, KnowledgeEntry[]>) => {
+    const normalized = createEmptyKnowledgeBase();
+    Object.values(KnowledgeCategory).forEach(category => {
+      if (Array.isArray(next[category])) {
+        normalized[category] = next[category].map(entry => ({
+          ...entry,
+          category: entry.category ?? category,
+        }));
+      }
+    });
+    setKnowledgeBaseState(normalized);
   };
 
   const addConversation = (conversation: Conversation) => {
@@ -196,10 +373,24 @@ export const KnowledgeBaseProvider: React.FC<{ children: ReactNode }> = ({ child
 
   const deleteConversationSummary = (id: string) => {
     setConversationSummaries(prev => prev.filter(summary => summary.id !== id));
+    setKnowledgeBaseState(prev => {
+      const next = { ...prev } as Record<KnowledgeCategory, KnowledgeEntry[]>;
+      Object.values(KnowledgeCategory).forEach(category => {
+        next[category] = prev[category].filter(entry => entry.relatedSummaryId !== id);
+      });
+      return next;
+    });
   };
 
   const clearConversationSummaries = () => {
     setConversationSummaries([]);
+    setKnowledgeBaseState(prev => {
+      const next = { ...prev } as Record<KnowledgeCategory, KnowledgeEntry[]>;
+      Object.values(KnowledgeCategory).forEach(category => {
+        next[category] = prev[category].filter(entry => !entry.relatedSummaryId);
+      });
+      return next;
+    });
   };
 
   const getRelevantSummaries = async (query: string, limit: number = 5): Promise<ConversationSummary[]> => {
@@ -242,6 +433,8 @@ export const KnowledgeBaseProvider: React.FC<{ children: ReactNode }> = ({ child
       value={{
         knowledgeBase,
         addToKnowledgeBase,
+        updateKnowledgeEntry,
+        deleteKnowledgeEntry,
         setKnowledgeBase,
         conversations,
         addConversation,

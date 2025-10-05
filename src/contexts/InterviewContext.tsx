@@ -1,5 +1,12 @@
 import React, { createContext, useState, useContext, ReactNode } from 'react';
 
+export interface Suggestion {
+  id: string;
+  title: string;
+  content: string;
+  confidence?: number;
+}
+
 interface InterviewContextType {
   currentText: string;
   setCurrentText: React.Dispatch<React.SetStateAction<string>>;
@@ -9,6 +16,8 @@ interface InterviewContextType {
   setDisplayedAiResult: React.Dispatch<React.SetStateAction<string>>;
   lastProcessedIndex: number;
   setLastProcessedIndex: React.Dispatch<React.SetStateAction<number>>;
+  suggestions: Suggestion[];
+  setSuggestions: React.Dispatch<React.SetStateAction<Suggestion[]>>;
 }
 
 const InterviewContext = createContext<InterviewContextType | undefined>(undefined);
@@ -18,6 +27,7 @@ export const InterviewProvider: React.FC<{ children: ReactNode }> = ({ children 
   const [aiResult, setAiResult] = useState("");
   const [displayedAiResult, setDisplayedAiResult] = useState("");
   const [lastProcessedIndex, setLastProcessedIndex] = useState(0);
+  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
 
   return (
     <InterviewContext.Provider
@@ -30,6 +40,8 @@ export const InterviewProvider: React.FC<{ children: ReactNode }> = ({ children 
         setDisplayedAiResult,
         lastProcessedIndex,
         setLastProcessedIndex,
+        suggestions,
+        setSuggestions,
       }}
     >
       {children}

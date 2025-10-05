@@ -21,6 +21,8 @@ export interface ElectronAPI {
     signal?: AbortSignal;
   }) => Promise<{ content: string } | { error: string }>;
   transcribeAudio: (audioBuffer: ArrayBuffer, config: any) => Promise<TranscriptionResult>;
+  readPromptTemplate: (templateName: string) => Promise<{ content: string } | { error: string }>;
+  listPromptTemplates: () => Promise<{ templates: Array<{ name: string; filename: string }> } | { error: string }>;
 }
 
 declare global {

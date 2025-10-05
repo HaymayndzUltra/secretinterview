@@ -23,4 +23,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   transcribeAudioFile: (filePath: string, config: any) => ipcRenderer.invoke('transcribe-audio-file', filePath, config),
   saveTempAudioFile: (audioBuffer: ArrayBuffer) => ipcRenderer.invoke('save-temp-audio-file', audioBuffer),
   transcribeAudio: (audioBuffer: ArrayBuffer, config: any) => ipcRenderer.invoke('transcribe-audio', audioBuffer, config),
+  readPromptTemplate: (templateName: string) => ipcRenderer.invoke('read-prompt-template', templateName),
+  listPromptTemplates: () => ipcRenderer.invoke('list-prompt-templates'),
 });

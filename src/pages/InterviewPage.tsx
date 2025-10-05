@@ -12,10 +12,14 @@ import { useKnowledgeBase } from "../contexts/KnowledgeBaseContext";
 import ErrorDisplay from "../components/ErrorDisplay";
 import { useError } from "../contexts/ErrorContext";
 import { useInterview } from "../contexts/InterviewContext";
+import TemplateSelector from "../components/TemplateSelector";
+import ConversationMemoryManager from "../components/ConversationMemoryManager";
 import ReactMarkdown from 'react-markdown';
+import { buildInterviewPrompt } from '../utils/promptBuilder';
+import { processConversationExchange } from '../services/conversationMemory';
 
 const InterviewPage: React.FC = () => {
-  const { knowledgeBase, conversations, addConversation, clearConversations } = useKnowledgeBase();
+  const { knowledgeBase, conversations, addConversation, clearConversations, profileSummary, selectedScenario, templateContent, addConversationSummary, getRelevantSummaries } = useKnowledgeBase();
   const { error, setError, clearError } = useError();
   const {
     currentText,
@@ -39,20 +43,20 @@ const InterviewPage: React.FC = () => {
 
   const markdownStyles = `
     .markdown-body {
-      font-size: 16px;
-      line-height: 1.5;
+      font-size: 14px;
+      line-height: 1.2;
     }
     .markdown-body p {
-      margin-bottom: 16px;
+      margin-bottom: 4px;
     }
     .markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4, .markdown-body h5, .markdown-body h6 {
-      margin-top: 24px;
-      margin-bottom: 16px;
+      margin-top: 8px;
+      margin-bottom: 4px;
       font-weight: 600;
-      line-height: 1.25;
+      line-height: 1.1;
     }
     .markdown-body code {
-      padding: 0.2em 0.4em;
+      padding: 0.1em 0.3em;
       margin: 0;
       font-size: 85%;
       background-color: rgba(27,31,35,0.05);
@@ -60,12 +64,18 @@ const InterviewPage: React.FC = () => {
     }
     .markdown-body pre {
       word-wrap: normal;
-      padding: 16px;
+      padding: 8px;
       overflow: auto;
       font-size: 85%;
-      line-height: 1.45;
+      line-height: 1.2;
       background-color: #f6f8fa;
       border-radius: 3px;
+    }
+    .markdown-body ul, .markdown-body ol {
+      margin-bottom: 4px;
+    }
+    .markdown-body li {
+      margin-bottom: 2px;
     }
   `;
 
@@ -80,9 +90,38 @@ const InterviewPage: React.FC = () => {
     setIsLoading(true);
     try {
       const config = await window.electronAPI.getConfig();
+      
+      // Build the system prompt using the prompt builder
+      let systemPrompt = buildInterviewPrompt(profileSummary, selectedScenario);
+      
+      // Merge template content if available
+      if (templateContent) {
+        systemPrompt = `${systemPrompt}\n\n## Additional Template Instructions\n\n${templateContent}`;
+      }
+
+      // Get relevant conversation summaries
+      const relevantSummaries = await getRelevantSummaries(contentToProcess, 3);
+      
+      // Build conversation context from summaries
+      let conversationContext = '';
+      if (relevantSummaries.length > 0) {
+        conversationContext = '\n\n## Previous Conversation Context\n\n';
+        relevantSummaries.forEach((summary, index) => {
+          conversationContext += `**Previous Discussion ${index + 1}:**\n`;
+          conversationContext += `Summary: ${summary.summary}\n`;
+          conversationContext += `Tags: ${summary.tags.join(', ')}\n`;
+          if (summary.pinned) {
+            conversationContext += `(Pinned)\n`;
+          }
+          conversationContext += '\n';
+        });
+      }
+      
       const messages = [
+        { role: "system", content: systemPrompt + conversationContext },
         ...knowledgeBase.map(item => ({ role: "user", content: item })),
-        ...conversations,
+        // Only include recent conversations (last 5 exchanges) to avoid token limits
+        ...conversations.slice(-10),
         { role: "user", content: contentToProcess }
       ];
 
@@ -100,6 +139,19 @@ const InterviewPage: React.FC = () => {
       addConversation({ role: "assistant", content: formattedResponse });
       setDisplayedAiResult(prev => prev + (prev ? '\n\n' : '') + formattedResponse);
       setLastProcessedIndex(currentText.length);
+      
+      // Generate conversation summary for long-term memory
+      try {
+        const conversationSummary = await processConversationExchange(
+          contentToProcess,
+          formattedResponse,
+          conversations.slice(-6) // Include recent context
+        );
+        addConversationSummary(conversationSummary);
+      } catch (summaryError) {
+        console.error('Failed to generate conversation summary:', summaryError);
+        // Don't fail the main conversation if summary generation fails
+      }
     } catch (error) {
       setError('Failed to get response from GPT. Please try again.');
     } finally {
@@ -268,6 +320,13 @@ const InterviewPage: React.FC = () => {
     <div className="flex flex-col h-[calc(100vh-2.5rem)] p-2 space-y-2">
       <style>{markdownStyles}</style>
       <ErrorDisplay error={error} onClose={clearError} />
+      
+      {/* Template Selector */}
+      <TemplateSelector />
+      
+      {/* Conversation Memory Manager */}
+      <ConversationMemoryManager />
+      
       <div className="flex justify-center items-center space-x-2">
         <button
           onClick={isRecording ? stopRecording : startRecording}

@@ -93,3 +93,4 @@ out/
 
 # Electron
 **/node_modules/electron/**
+whisper/models/*.bin

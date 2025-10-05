@@ -491,3 +491,45 @@ ipcMain.handle("stop-deepgram", () => {
     deepgramConnection = null;
   }
 });
+
+// Handle reading prompt template files
+ipcMain.handle("read-prompt-template", async (event, templateName: string) => {
+  try {
+    const promptsDir = path.join(__dirname, 'prompts');
+    const templatePath = path.join(promptsDir, `${templateName}.md`);
+    
+    // Check if file exists
+    if (!fs.existsSync(templatePath)) {
+      return { error: `Template '${templateName}' not found` };
+    }
+    
+    const content = fs.readFileSync(templatePath, 'utf-8');
+    return { content };
+  } catch (error) {
+    return { error: `Failed to read template: ${error.message}` };
+  }
+});
+
+// Handle listing available prompt templates
+ipcMain.handle("list-prompt-templates", async () => {
+  try {
+    const promptsDir = path.join(__dirname, 'prompts');
+    
+    // Check if prompts directory exists
+    if (!fs.existsSync(promptsDir)) {
+      return { templates: [] };
+    }
+    
+    const files = fs.readdirSync(promptsDir);
+    const templates = files
+      .filter(file => file.endsWith('.md'))
+      .map(file => ({
+        name: file.replace('.md', ''),
+        filename: file
+      }));
+    
+    return { templates };
+  } catch (error) {
+    return { error: `Failed to list templates: ${error.message}` };
+  }
+});

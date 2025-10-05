@@ -1,10 +1,16 @@
 import React, { useState, useRef } from 'react';
-import { useKnowledgeBase } from '../contexts/KnowledgeBaseContext';
+import { useKnowledgeBase, ProfileSummary } from '../contexts/KnowledgeBaseContext';
 import { useError } from '../contexts/ErrorContext';
 import ErrorDisplay from '../components/ErrorDisplay';
+import ProfileSummaryCard from '../components/ProfileSummaryCard';
+import TemplateSelector from '../components/TemplateSelector';
+import ConversationMemoryManager from '../components/ConversationMemoryManager';
 import OpenAI from 'openai';
 import ReactMarkdown from 'react-markdown';
 import { FaFile, FaImage } from 'react-icons/fa';
+import { extractProfileFromText } from '../services/profileExtractor';
+import { buildInterviewPrompt } from '../utils/promptBuilder';
+import { processConversationExchange } from '../services/conversationMemory';
 
 interface UploadedFile extends File {
   pdfText?: string;
@@ -19,13 +25,67 @@ const KnowledgeBase: React.FC = () => {
     addConversation, 
     clearConversations,
     displayedAiResult,
-    setDisplayedAiResult
+    setDisplayedAiResult,
+    profileSummary,
+    setProfileSummary,
+    selectedScenario,
+    templateContent,
+    addConversationSummary,
+    getRelevantSummaries
   } = useKnowledgeBase();
   const { error, setError, clearError } = useError();
   const [chatInput, setChatInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
+
+  const markdownStyles = `
+    .markdown-body {
+      font-size: 14px;
+      line-height: 1.2;
+    }
+    .markdown-body p {
+      margin-bottom: 4px;
+    }
+    .markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4, .markdown-body h5, .markdown-body h6 {
+      margin-top: 8px;
+      margin-bottom: 4px;
+      font-weight: 600;
+      line-height: 1.1;
+    }
+    .markdown-body code {
+      padding: 0.1em 0.3em;
+      margin: 0;
+      font-size: 85%;
+      background-color: rgba(27,31,35,0.05);
+      border-radius: 3px;
+    }
+    .markdown-body pre {
+      word-wrap: normal;
+      padding: 8px;
+      overflow: auto;
+      font-size: 85%;
+      line-height: 1.2;
+      background-color: #f6f8fa;
+      border-radius: 3px;
+    }
+    .markdown-body ul, .markdown-body ol {
+      margin-bottom: 4px;
+    }
+    .markdown-body li {
+      margin-bottom: 2px;
+    }
+  `;
+
+  // Handler for updating profile summary
+  const handleUpdateProfile = (updatedProfile: ProfileSummary) => {
+    setProfileSummary(updatedProfile);
+  };
+
+  // Handler for clearing profile summary
+  const handleClearProfile = () => {
+    setProfileSummary(null);
+  };
 
   const simulateTyping = (text: string) => {
     let i = 0;
@@ -83,8 +143,35 @@ const KnowledgeBase: React.FC = () => {
       addConversation({ role: "user", content: userMessage });
 
       const config = await window.electronAPI.getConfig();
+      
+      // Build the system prompt using the prompt builder
+      let systemPrompt = buildInterviewPrompt(profileSummary, selectedScenario);
+      
+      // Merge template content if available
+      if (templateContent) {
+        systemPrompt = `${systemPrompt}\n\n## Additional Template Instructions\n\n${templateContent}`;
+      }
+
+      // Get relevant conversation summaries
+      const relevantSummaries = await getRelevantSummaries(userMessage, 3);
+      
+      // Build conversation context from summaries
+      let conversationContext = '';
+      if (relevantSummaries.length > 0) {
+        conversationContext = '\n\n## Previous Conversation Context\n\n';
+        relevantSummaries.forEach((summary, index) => {
+          conversationContext += `**Previous Discussion ${index + 1}:**\n`;
+          conversationContext += `Summary: ${summary.summary}\n`;
+          conversationContext += `Tags: ${summary.tags.join(', ')}\n`;
+          if (summary.pinned) {
+            conversationContext += `(Pinned)\n`;
+          }
+          conversationContext += '\n';
+        });
+      }
+      
       const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
-        { role: "system", content: "" },
+        { role: "system", content: systemPrompt + conversationContext },
         ...knowledgeBase.map(item => {
           if (item.startsWith('data:image')) {
             return {
@@ -94,7 +181,8 @@ const KnowledgeBase: React.FC = () => {
           }
           return { role: "user", content: item } as OpenAI.Chat.ChatCompletionUserMessageParam;
         }),
-        ...conversations.map(conv => ({
+        // Only include recent conversations (last 5 exchanges) to avoid token limits
+        ...conversations.slice(-10).map(conv => ({
           role: conv.role,
           content: conv.content
         }) as OpenAI.Chat.ChatCompletionMessageParam),
@@ -133,6 +221,19 @@ const KnowledgeBase: React.FC = () => {
 
       addConversation({ role: "assistant", content: response.content });
       simulateTyping(response.content);
+      
+      // Generate conversation summary for long-term memory
+      try {
+        const conversationSummary = await processConversationExchange(
+          userMessage,
+          response.content,
+          conversations.slice(-6) // Include recent context
+        );
+        addConversationSummary(conversationSummary);
+      } catch (summaryError) {
+        console.error('Failed to generate conversation summary:', summaryError);
+        // Don't fail the main conversation if summary generation fails
+      }
     } catch (error) {
       setError('Failed to get response from GPT. Please try again.');
       console.error('Detailed error:', error);
@@ -165,14 +266,92 @@ const KnowledgeBase: React.FC = () => {
         return file as UploadedFile;
       }));
       console.log('Processed files:', processedFiles);
+      
+      // Extract profile information from text-based files
+      const textFiles = processedFiles.filter(file => 
+        file.pdfText || 
+        (file.type && (file.type.startsWith('text/') || file.type === 'application/pdf'))
+      );
+      
+      if (textFiles.length > 0) {
+        try {
+          // Combine all text content for profile extraction
+          const combinedText = textFiles.map(file => {
+            if (file.pdfText) {
+              return file.pdfText;
+            } else if (file.type && file.type.startsWith('text/')) {
+              // For text files, we'll need to read them
+              return new Promise<string>((resolve) => {
+                const reader = new FileReader();
+                reader.onload = (e) => resolve(e.target?.result as string || '');
+                reader.readAsText(file);
+              });
+            }
+            return '';
+          }).join('\n\n');
+
+          // Wait for all text content to be read
+          const allTextContent = await Promise.all(
+            textFiles.map(async (file) => {
+              if (file.pdfText) {
+                return file.pdfText;
+              } else if (file.type && file.type.startsWith('text/')) {
+                return new Promise<string>((resolve) => {
+                  const reader = new FileReader();
+                  reader.onload = (e) => resolve(e.target?.result as string || '');
+                  reader.readAsText(file);
+                });
+              }
+              return '';
+            })
+          );
+
+          const combinedTextContent = allTextContent.join('\n\n');
+          
+          if (combinedTextContent.trim()) {
+            console.log('Extracting profile from text content...');
+            const extractionResult = await extractProfileFromText(combinedTextContent);
+            
+            if (extractionResult.success && extractionResult.profileSummary) {
+              console.log('Profile extraction successful:', extractionResult.profileSummary);
+              setProfileSummary(extractionResult.profileSummary);
+              
+              // Also add the raw content to knowledge base for traceability
+              addToKnowledgeBase(`[Profile Document] ${textFiles.map(f => f.name).join(', ')}\n\n${combinedTextContent}`);
+            } else {
+              console.warn('Profile extraction failed:', extractionResult.error);
+              // Still add raw content to knowledge base even if extraction fails
+              addToKnowledgeBase(`[Document] ${textFiles.map(f => f.name).join(', ')}\n\n${combinedTextContent}`);
+            }
+          }
+        } catch (error) {
+          console.error('Error during profile extraction:', error);
+          // Continue with file upload even if profile extraction fails
+        }
+      }
+      
       setUploadedFiles(prevFiles => [...prevFiles, ...processedFiles]);
     }
   };
 
   return (
     <div className="flex flex-col h-[calc(100vh-2.5rem)] p-2 max-w-4xl mx-auto">
+      <style>{markdownStyles}</style>
       <ErrorDisplay error={error} onClose={clearError} />
       <h1 className="text-xl font-bold mb-1">Knowledge Base Chat</h1>
+      
+      {/* Template Selector */}
+      <TemplateSelector className="mb-4" />
+      
+      {/* Profile Summary Card */}
+      <ProfileSummaryCard
+        profileSummary={profileSummary}
+        onUpdateProfile={handleUpdateProfile}
+        onClearProfile={handleClearProfile}
+      />
+      
+      {/* Conversation Memory Manager */}
+      <ConversationMemoryManager className="mb-4" />
       <div className="flex-1 overflow-auto mb-4 border-2 border-gray-300 rounded-lg p-4 bg-base-100 shadow-md">
         {conversations.map((conv, index) => (
           <div key={index} className={`mb-2 ${conv.role === 'user' ? 'text-right' : 'text-left'}`}>
@@ -192,9 +371,9 @@ const KnowledgeBase: React.FC = () => {
                 </span>
               ) : (
                 index === conversations.length - 1 ? (
-                  <ReactMarkdown>{displayedAiResult}</ReactMarkdown>
+                  <ReactMarkdown className="markdown-body">{displayedAiResult}</ReactMarkdown>
                 ) : (
-                  <ReactMarkdown>{conv.content}</ReactMarkdown>
+                  <ReactMarkdown className="markdown-body">{conv.content}</ReactMarkdown>
                 )
               )}
             </div>

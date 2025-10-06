@@ -23,6 +23,10 @@ export const mainConfig: Configuration = {
           from: path.resolve(__dirname, 'prompts'),
           to: path.resolve(__dirname, '.webpack/main/prompts'),
         },
+        {
+          from: path.resolve(__dirname, 'whisper'),
+          to: path.resolve(__dirname, '.webpack/main/whisper'),
+        },
       ],
     }),
   ],

@@ -11,12 +11,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   highlightCode: (code: string, language: string) => ipcRenderer.invoke('highlight-code', code, language),
   ipcRenderer: {
     invoke: (channel: string, ...args: any[]) => ipcRenderer.invoke(channel, ...args),
+    send: (channel: string, ...args: any[]) => ipcRenderer.send(channel, ...args),
     on: (channel: string, listener: (event: any, ...args: any[]) => void) => {
       ipcRenderer.on(channel, listener);
       return () => ipcRenderer.removeListener(channel, listener);
     },
     removeListener: (channel: string, listener: (event: any, ...args: any[]) => void) => ipcRenderer.removeListener(channel, listener),
   },
+  startTranscriptionEngine: (config: any) => ipcRenderer.invoke('start-transcription-engine', config),
+  stopTranscriptionEngine: () => ipcRenderer.invoke('stop-transcription-engine'),
+  sendStreamingAudioChunk: (audioBuffer: ArrayBuffer) => ipcRenderer.send('streaming-audio-chunk', audioBuffer),
   callOpenAI: (params: any) => ipcRenderer.invoke('callOpenAI', params),
   loadAudioProcessor: (): Promise<string> => ipcRenderer.invoke('load-audio-processor'),
   getSystemAudioStream: () => ipcRenderer.invoke('get-system-audio-stream'),

@@ -12,7 +12,8 @@ export interface ElectronAPI {
   ipcRenderer: {
     removeAllListeners: any;
     invoke(channel: string, ...args: any[]): Promise<any>;
-    on(channel: string, listener: (event: any, ...args: any[]) => void): void;
+    send(channel: string, ...args: any[]): void;
+    on(channel: string, listener: (event: any, ...args: any[]) => void): () => void;
     removeListener(channel: string, listener: (...args: any[]) => void): void;
   };
   callOpenAI: (params: {
@@ -23,6 +24,10 @@ export interface ElectronAPI {
   transcribeAudio: (audioBuffer: ArrayBuffer, config: any) => Promise<TranscriptionResult>;
   readPromptTemplate: (templateName: string) => Promise<{ content: string } | { error: string }>;
   listPromptTemplates: () => Promise<{ templates: Array<{ name: string; filename: string }> } | { error: string }>;
+  checkLocalAsrAvailability: () => Promise<any>;
+  startLocalAsr: (options: any) => Promise<{ success: boolean; error?: string }>;
+  stopLocalAsr: () => Promise<{ success: boolean }>;
+  sendAudioToLocalAsr: (audioBuffer: ArrayBuffer) => void;
 }
 
 declare global {

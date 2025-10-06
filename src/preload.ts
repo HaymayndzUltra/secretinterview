@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   highlightCode: (code: string, language: string) => ipcRenderer.invoke('highlight-code', code, language),
   ipcRenderer: {
     invoke: (channel: string, ...args: any[]) => ipcRenderer.invoke(channel, ...args),
+    send: (channel: string, ...args: any[]) => ipcRenderer.send(channel, ...args),
     on: (channel: string, listener: (event: any, ...args: any[]) => void) => {
       ipcRenderer.on(channel, listener);
       return () => ipcRenderer.removeListener(channel, listener);
@@ -25,4 +26,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   transcribeAudio: (audioBuffer: ArrayBuffer, config: any) => ipcRenderer.invoke('transcribe-audio', audioBuffer, config),
   readPromptTemplate: (templateName: string) => ipcRenderer.invoke('read-prompt-template', templateName),
   listPromptTemplates: () => ipcRenderer.invoke('list-prompt-templates'),
+  checkLocalAsrAvailability: () => ipcRenderer.invoke('check-local-asr'),
+  startLocalAsr: (options: any) => ipcRenderer.invoke('start-local-asr', options),
+  stopLocalAsr: () => ipcRenderer.invoke('stop-local-asr'),
+  sendAudioToLocalAsr: (audioBuffer: ArrayBuffer) => ipcRenderer.send('send-audio-to-local-asr', audioBuffer),
 });

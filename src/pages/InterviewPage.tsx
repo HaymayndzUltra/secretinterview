@@ -53,10 +53,10 @@ const InterviewPage: React.FC = () => {
   const [userMedia, setUserMedia] = useState<MediaStream | null>(null);
   const [audioContext, setAudioContext] = useState<AudioContext | null>(null);
   const [processor, setProcessor] = useState<ScriptProcessorNode | null>(null);
-  const [autoSubmitTimer, setAutoSubmitTimer] = useState<NodeJS.Timeout | null>(null);
   const aiResponseRef = useRef<HTMLDivElement>(null);
   const [collapsedSegments, setCollapsedSegments] = useState<Record<string, boolean>>({});
   const wasNearBottomRef = useRef(true);
+  const lastTranscriptRef = useRef<string>('');
 
   const knowledgeEntriesForPrompt = useMemo(() => {
     const prioritizedCategories = [
@@ -242,36 +242,38 @@ const InterviewPage: React.FC = () => {
     handleAskGPT(newContent);
   }, [handleAskGPT]);
 
+  const handleTranscriptionResult = useCallback((_event: any, data: any) => {
+    if (data?.transcript) {
+      const transcript = String(data.transcript).trim();
+      if (!transcript) {
+        return;
+      }
+      if (lastTranscriptRef.current === transcript) {
+        return;
+      }
+      setCurrentText((prev: string) => {
+        const needsSpace = prev.length > 0 && !prev.endsWith(' ');
+        return `${prev}${needsSpace ? ' ' : ''}${transcript} `;
+      });
+      lastTranscriptRef.current = transcript;
+    }
+  }, [setCurrentText]);
+
+  const handleTranscriptionError = useCallback((_event: any, payload: any) => {
+    if (payload?.message) {
+      setError(`Transcription error${payload.engine ? ` (${payload.engine})` : ''}: ${payload.message}`);
+    }
+  }, [setError]);
+
   useEffect(() => {
     let lastTranscriptTime = Date.now();
     let checkTimer: NodeJS.Timeout | null = null;
 
-    const handleDeepgramTranscript = (_event: any, data: any) => {
-      if (data.transcript && data.is_final) {
-        setCurrentText((prev: string) => {
-          const newTranscript = data.transcript.trim();
-          if (!prev.endsWith(newTranscript)) {
-            lastTranscriptTime = Date.now();
-            const updatedText = prev + (prev ? '\n' : '') + newTranscript;
-            
-            if (isAutoGPTEnabled) {
-              if (autoSubmitTimer) {
-                clearTimeout(autoSubmitTimer);
-              }
-              const newTimer = setTimeout(() => {
-                const newContent = updatedText.slice(lastProcessedIndex);
-                if (newContent.trim()) {
-                  handleAskGPTStable(newContent);
-                }
-              }, 2000);
-              setAutoSubmitTimer(newTimer);
-            }
-            
-            return updatedText;
-          }
-          return prev;
-        });
+    const handleResult = (_event: any, data: any) => {
+      if (data?.transcript && data?.is_final) {
+        lastTranscriptTime = Date.now();
       }
+      handleTranscriptionResult(_event, data);
     };
 
     const checkAndSubmit = () => {
@@ -284,24 +286,31 @@ const InterviewPage: React.FC = () => {
       checkTimer = setTimeout(checkAndSubmit, 1000);
     };
 
-    window.electronAPI.ipcRenderer.on('deepgram-transcript', handleDeepgramTranscript);
+    window.electronAPI.ipcRenderer.on('transcription-result', handleResult);
+    window.electronAPI.ipcRenderer.on('transcription-error', handleTranscriptionError);
     checkTimer = setTimeout(checkAndSubmit, 1000);
 
     return () => {
-      window.electronAPI.ipcRenderer.removeListener('deepgram-transcript', handleDeepgramTranscript);
+      window.electronAPI.ipcRenderer.removeListener('transcription-result', handleResult);
+      window.electronAPI.ipcRenderer.removeListener('transcription-error', handleTranscriptionError);
       if (checkTimer) {
         clearTimeout(checkTimer);
       }
     };
-  }, [isAutoGPTEnabled, lastProcessedIndex, currentText, handleAskGPTStable, setCurrentText, setLastProcessedIndex]);
+  }, [isAutoGPTEnabled, lastProcessedIndex, currentText, handleAskGPTStable, handleTranscriptionResult, handleTranscriptionError]);
 
   const loadConfig = async () => {
     try {
       const config = await window.electronAPI.getConfig();
-      if (config && config.openai_key && config.deepgram_api_key) {
+      const localAsr = config?.local_asr || {};
+      const hasLocal = Boolean(localAsr.enabled && localAsr.host && localAsr.port);
+      const hasDeepgram = Boolean(config?.deepgram_api_key);
+      if (hasLocal || hasDeepgram) {
         setIsConfigured(true);
+        clearError();
       } else {
-        setError("OpenAI API key or Deepgram API key not configured. Please check settings.");
+        setIsConfigured(false);
+        setError("No streaming transcription engine configured. Enable a local GPU ASR server or add a Deepgram API key in Settings.");
       }
     } catch (err) {
       setError("Failed to load configuration. Please check settings.");
@@ -321,29 +330,54 @@ const InterviewPage: React.FC = () => {
       setUserMedia(stream);
 
       const config = await window.electronAPI.getConfig();
-      const result = await window.electronAPI.ipcRenderer.invoke('start-deepgram', {
-        deepgram_key: config.deepgram_api_key
+      lastTranscriptRef.current = '';
+      const startResult = await window.electronAPI.startTranscriptionEngine({
+        deepgram_key: config.deepgram_api_key,
+        primaryLanguage: config.primaryLanguage,
+        local_asr: config.local_asr,
       });
-      if (!result.success) {
-        throw new Error(result.error);
+      if (!startResult.success) {
+        throw new Error(startResult.error || 'Failed to initialise transcription engine');
       }
 
-      const context = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+      const context = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000, latencyHint: 'interactive' });
       setAudioContext(context);
       const source = context.createMediaStreamSource(stream);
-      const processor = context.createScriptProcessor(4096, 1, 1);
+      const bufferSize = 1024;
+      const processor = context.createScriptProcessor(bufferSize, 1, 1) as ScriptProcessorNode & {
+        pendingRemainder?: Float32Array;
+      };
       setProcessor(processor);
 
       source.connect(processor);
       processor.connect(context.destination);
 
-      processor.onaudioprocess = (e: { inputBuffer: { getChannelData: (arg0: number) => any; }; }) => {
+      const usingLocalEngine = (startResult.engine ?? (config?.local_asr?.enabled ? 'local' : 'deepgram')) === 'local' && Boolean(config?.local_asr?.host && config?.local_asr?.port);
+      const chunkDurationMsRaw = usingLocalEngine ? Number(config?.local_asr?.chunkMillis ?? 80) : 160;
+      const chunkDurationMs = Math.min(300, Math.max(20, Number.isFinite(chunkDurationMsRaw) ? chunkDurationMsRaw : 80));
+      const samplesPerChunk = Math.max(256, Math.floor((context.sampleRate * chunkDurationMs) / 1000));
+      let pendingRemainder = new Float32Array(0);
+
+      processor.onaudioprocess = (e: AudioProcessingEvent) => {
         const inputData = e.inputBuffer.getChannelData(0);
-        const audioData = new Int16Array(inputData.length);
-        for (let i = 0; i < inputData.length; i++) {
-          audioData[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
+        const combined = new Float32Array(pendingRemainder.length + inputData.length);
+        combined.set(pendingRemainder);
+        combined.set(inputData, pendingRemainder.length);
+
+        let offset = 0;
+        while (offset + samplesPerChunk <= combined.length) {
+          const chunk = combined.subarray(offset, offset + samplesPerChunk);
+          const audioData = new Int16Array(chunk.length);
+          for (let i = 0; i < chunk.length; i++) {
+            const clamped = Math.max(-1, Math.min(1, chunk[i]));
+            audioData[i] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7FFF;
+          }
+          window.electronAPI.sendStreamingAudioChunk(audioData.buffer);
+          offset += samplesPerChunk;
         }
-        window.electronAPI.ipcRenderer.invoke('send-audio-to-deepgram', audioData.buffer);
+
+        pendingRemainder = offset < combined.length ? combined.slice(offset) : new Float32Array(0);
+        processor.pendingRemainder = pendingRemainder;
       };
 
       setIsRecording(true);
@@ -361,12 +395,22 @@ const InterviewPage: React.FC = () => {
     }
     if (processor) {
       processor.disconnect();
+      const remainder = (processor as any).pendingRemainder as Float32Array | undefined;
+      if (remainder && remainder.length) {
+        const audioData = new Int16Array(remainder.length);
+        for (let i = 0; i < remainder.length; i++) {
+          const clamped = Math.max(-1, Math.min(1, remainder[i]));
+          audioData[i] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7FFF;
+        }
+        window.electronAPI.sendStreamingAudioChunk(audioData.buffer);
+      }
     }
-    window.electronAPI.ipcRenderer.invoke('stop-deepgram');
+    window.electronAPI.stopTranscriptionEngine();
     setIsRecording(false);
     setUserMedia(null);
     setAudioContext(null);
     setProcessor(null);
+    lastTranscriptRef.current = '';
   };
 
   useEffect(() => {

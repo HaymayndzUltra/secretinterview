@@ -12,6 +12,7 @@ export interface ElectronAPI {
   ipcRenderer: {
     removeAllListeners: any;
     invoke(channel: string, ...args: any[]): Promise<any>;
+    send(channel: string, ...args: any[]): void;
     on(channel: string, listener: (event: any, ...args: any[]) => void): void;
     removeListener(channel: string, listener: (...args: any[]) => void): void;
   };
@@ -20,6 +21,9 @@ export interface ElectronAPI {
     messages: any[];
     signal?: AbortSignal;
   }) => Promise<{ content: string } | { error: string }>;
+  startTranscriptionEngine: (config: any) => Promise<{ success: boolean; engine?: string; error?: string }>;
+  stopTranscriptionEngine: () => Promise<{ success: boolean }>;
+  sendStreamingAudioChunk: (audioBuffer: ArrayBuffer) => void;
   transcribeAudio: (audioBuffer: ArrayBuffer, config: any) => Promise<TranscriptionResult>;
   readPromptTemplate: (templateName: string) => Promise<{ content: string } | { error: string }>;
   listPromptTemplates: () => Promise<{ templates: Array<{ name: string; filename: string }> } | { error: string }>;

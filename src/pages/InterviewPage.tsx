@@ -53,10 +53,14 @@ const InterviewPage: React.FC = () => {
   const [userMedia, setUserMedia] = useState<MediaStream | null>(null);
   const [audioContext, setAudioContext] = useState<AudioContext | null>(null);
   const [processor, setProcessor] = useState<ScriptProcessorNode | null>(null);
-  const [autoSubmitTimer, setAutoSubmitTimer] = useState<NodeJS.Timeout | null>(null);
+  const [activeEngine, setActiveEngine] = useState<'local' | 'deepgram' | null>(null);
+  const [engineStatus, setEngineStatus] = useState<'idle' | 'connecting' | 'open' | 'closed'>('idle');
   const aiResponseRef = useRef<HTMLDivElement>(null);
   const [collapsedSegments, setCollapsedSegments] = useState<Record<string, boolean>>({});
   const wasNearBottomRef = useRef(true);
+  const configRef = useRef<any>({});
+  const lastTranscriptRef = useRef<number>(Date.now());
+  const autoSubmitTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const knowledgeEntriesForPrompt = useMemo(() => {
     const prioritizedCategories = [
@@ -110,10 +114,6 @@ const InterviewPage: React.FC = () => {
       margin-bottom: 2px;
     }
   `;
-
-  useEffect(() => {
-    loadConfig();
-  }, []);
 
   const handleAskGPT = async (newContent?: string) => {
     const contentToProcess = newContent || currentText.slice(lastProcessedIndex).trim();
@@ -243,39 +243,68 @@ const InterviewPage: React.FC = () => {
   }, [handleAskGPT]);
 
   useEffect(() => {
-    let lastTranscriptTime = Date.now();
     let checkTimer: NodeJS.Timeout | null = null;
 
-    const handleDeepgramTranscript = (_event: any, data: any) => {
-      if (data.transcript && data.is_final) {
+    const handleTranscript = (_event: any, data: any) => {
+      if (data?.engine) {
+        setActiveEngine(prev => data.engine ?? prev);
+      }
+      const isFinal = data?.is_final ?? data?.isFinal;
+      if (data?.transcript && isFinal) {
+        lastTranscriptRef.current = Date.now();
         setCurrentText((prev: string) => {
           const newTranscript = data.transcript.trim();
-          if (!prev.endsWith(newTranscript)) {
-            lastTranscriptTime = Date.now();
-            const updatedText = prev + (prev ? '\n' : '') + newTranscript;
-            
-            if (isAutoGPTEnabled) {
-              if (autoSubmitTimer) {
-                clearTimeout(autoSubmitTimer);
-              }
-              const newTimer = setTimeout(() => {
-                const newContent = updatedText.slice(lastProcessedIndex);
-                if (newContent.trim()) {
-                  handleAskGPTStable(newContent);
-                }
-              }, 2000);
-              setAutoSubmitTimer(newTimer);
-            }
-            
-            return updatedText;
+          if (!newTranscript) {
+            return prev;
           }
-          return prev;
+          const alreadyPresent = prev.endsWith(newTranscript);
+          if (alreadyPresent) {
+            return prev;
+          }
+          const updatedText = prev + (prev ? '\n' : '') + newTranscript;
+
+          if (isAutoGPTEnabled) {
+            if (autoSubmitTimerRef.current) {
+              clearTimeout(autoSubmitTimerRef.current);
+            }
+            const newTimer = setTimeout(() => {
+              const newContent = updatedText.slice(lastProcessedIndex);
+              if (newContent.trim()) {
+                handleAskGPTStable(newContent);
+              }
+            }, 2000);
+            autoSubmitTimerRef.current = newTimer;
+          }
+
+          return updatedText;
         });
       }
     };
 
+    const handleStatus = (_event: any, data: any) => {
+      if (data?.engine) {
+        setActiveEngine(data.engine);
+      }
+      if (data?.status) {
+        setEngineStatus(data.status);
+      }
+    };
+
+    const handleErrorEvent = (_event: any, data: any) => {
+      const engineLabel = data?.engine ? data.engine.toUpperCase() : 'ENGINE';
+      if (data?.engine) {
+        setActiveEngine(data.engine);
+      }
+      setEngineStatus('closed');
+      if (data?.message) {
+        setError(`Transcription (${engineLabel}) error: ${data.message}`);
+      } else {
+        setError('Transcription engine error.');
+      }
+    };
+
     const checkAndSubmit = () => {
-      if (isAutoGPTEnabled && Date.now() - lastTranscriptTime >= 2000) {
+      if (isAutoGPTEnabled && Date.now() - lastTranscriptRef.current >= 2000) {
         const newContent = currentText.slice(lastProcessedIndex);
         if (newContent.trim()) {
           handleAskGPTStable(newContent);
@@ -284,54 +313,93 @@ const InterviewPage: React.FC = () => {
       checkTimer = setTimeout(checkAndSubmit, 1000);
     };
 
-    window.electronAPI.ipcRenderer.on('deepgram-transcript', handleDeepgramTranscript);
+    window.electronAPI.ipcRenderer.on('transcription-transcript', handleTranscript);
+    window.electronAPI.ipcRenderer.on('transcription-status', handleStatus);
+    window.electronAPI.ipcRenderer.on('transcription-error', handleErrorEvent);
     checkTimer = setTimeout(checkAndSubmit, 1000);
 
     return () => {
-      window.electronAPI.ipcRenderer.removeListener('deepgram-transcript', handleDeepgramTranscript);
+      window.electronAPI.ipcRenderer.removeListener('transcription-transcript', handleTranscript);
+      window.electronAPI.ipcRenderer.removeListener('transcription-status', handleStatus);
+      window.electronAPI.ipcRenderer.removeListener('transcription-error', handleErrorEvent);
       if (checkTimer) {
         clearTimeout(checkTimer);
       }
+      if (autoSubmitTimerRef.current) {
+        clearTimeout(autoSubmitTimerRef.current);
+        autoSubmitTimerRef.current = null;
+      }
     };
-  }, [isAutoGPTEnabled, lastProcessedIndex, currentText, handleAskGPTStable, setCurrentText, setLastProcessedIndex]);
+  }, [isAutoGPTEnabled, lastProcessedIndex, currentText, handleAskGPTStable, setCurrentText, setError]);
 
   const loadConfig = async () => {
     try {
       const config = await window.electronAPI.getConfig();
-      if (config && config.openai_key && config.deepgram_api_key) {
+      configRef.current = config || {};
+      const hasLocalEngine = Boolean(
+        config?.local_asr_config?.enabled && config?.local_asr_config?.url
+      );
+      const hasDeepgram = Boolean(config?.deepgram_api_key);
+
+      if (hasLocalEngine || hasDeepgram) {
         setIsConfigured(true);
+        setEngineStatus('idle');
+        setActiveEngine(null);
+        clearError();
       } else {
-        setError("OpenAI API key or Deepgram API key not configured. Please check settings.");
+        setIsConfigured(false);
+        setError("No transcription engine configured. Configure a local GPU ASR endpoint or provide a Deepgram API key in settings.");
       }
     } catch (err) {
       setError("Failed to load configuration. Please check settings.");
+      setIsConfigured(false);
     }
   };
 
+  useEffect(() => {
+    loadConfig();
+  }, []);
+
   const startRecording = async () => {
+    let stream: MediaStream | null = null;
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({
+      clearError();
+      stream = await navigator.mediaDevices.getDisplayMedia({
         video: false,
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
           sampleRate: 16000,
+          channelCount: 1,
         },
       });
       setUserMedia(stream);
 
-      const config = await window.electronAPI.getConfig();
-      const result = await window.electronAPI.ipcRenderer.invoke('start-deepgram', {
-        deepgram_key: config.deepgram_api_key
-      });
-      if (!result.success) {
-        throw new Error(result.error);
+      const existingConfig = configRef.current && Object.keys(configRef.current).length > 0
+        ? configRef.current
+        : await window.electronAPI.getConfig();
+      configRef.current = existingConfig || {};
+
+      const transcriptionConfig = {
+        ...configRef.current,
+        deepgram_key: configRef.current.deepgram_api_key,
+      };
+
+      const result = await window.electronAPI.ipcRenderer.invoke('start-transcription', transcriptionConfig);
+      if (!result?.success) {
+        throw new Error(result?.error || 'Unable to start transcription engine');
       }
+
+      if (result.engine) {
+        setActiveEngine(result.engine);
+      }
+      setEngineStatus('connecting');
+      lastTranscriptRef.current = Date.now();
 
       const context = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
       setAudioContext(context);
       const source = context.createMediaStreamSource(stream);
-      const processor = context.createScriptProcessor(4096, 1, 1);
+      const processor = context.createScriptProcessor(2048, 1, 1);
       setProcessor(processor);
 
       source.connect(processor);
@@ -343,12 +411,20 @@ const InterviewPage: React.FC = () => {
         for (let i = 0; i < inputData.length; i++) {
           audioData[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
         }
-        window.electronAPI.ipcRenderer.invoke('send-audio-to-deepgram', audioData.buffer);
+        void window.electronAPI.ipcRenderer.invoke('send-audio-chunk', audioData.buffer);
       };
 
       setIsRecording(true);
     } catch (err: any) {
-      setError("Failed to start recording. Please check permissions or try again.");
+      console.error('Failed to start recording', err);
+      if (stream) {
+        stream.getTracks().forEach((track) => track.stop());
+      }
+      setUserMedia(null);
+      setActiveEngine(null);
+      setEngineStatus('idle');
+      setIsRecording(false);
+      setError(err?.message ? `Failed to start recording: ${err.message}` : "Failed to start recording. Please check permissions or try again.");
     }
   };
 
@@ -362,21 +438,26 @@ const InterviewPage: React.FC = () => {
     if (processor) {
       processor.disconnect();
     }
-    window.electronAPI.ipcRenderer.invoke('stop-deepgram');
+    if (autoSubmitTimerRef.current) {
+      clearTimeout(autoSubmitTimerRef.current);
+      autoSubmitTimerRef.current = null;
+    }
+    void window.electronAPI.ipcRenderer.invoke('stop-transcription');
     setIsRecording(false);
     setUserMedia(null);
     setAudioContext(null);
     setProcessor(null);
+    setActiveEngine(null);
+    setEngineStatus('closed');
   };
 
   useEffect(() => {
-    loadConfig();
     return () => {
       if (isRecording) {
         stopRecording();
       }
     };
-  }, []);
+  }, [isRecording]);
 
   useEffect(() => {
     const shouldAutoScroll = autoScrollEnabled && wasNearBottomRef.current;
@@ -468,6 +549,11 @@ const InterviewPage: React.FC = () => {
           />
           <span>Auto GPT</span>
         </label>
+      </div>
+      <div className="text-center text-xs opacity-70">
+        {activeEngine
+          ? `Transcription engine: ${activeEngine === 'local' ? 'Local GPU' : 'Deepgram'} (${engineStatus})`
+          : `Transcription engine status: ${engineStatus}`}
       </div>
       <div className="flex flex-1 space-x-2 overflow-hidden">
         <div className="flex-1 flex flex-col bg-base-200 p-2 rounded-lg">

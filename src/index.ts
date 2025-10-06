@@ -18,6 +18,7 @@ import fs from "fs";
 import path from "path";
 import { Buffer } from "buffer";
 import { createClient, LiveTranscriptionEvents } from "@deepgram/sdk";
+import LocalAsrClient from "./main/asr/LocalAsrClient";
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
 import electronSquirrelStartup from "electron-squirrel-startup";
@@ -152,8 +153,27 @@ app.on("activate", () => {
 
 import ElectronStore from "electron-store";
 
+interface LocalAsrSettings {
+  enabled?: boolean;
+  url?: string;
+  auth_token?: string;
+  chunk_ms?: number;
+  handshake_timeout_ms?: number;
+}
+
+interface AppConfig {
+  openai_key?: string;
+  api_base?: string;
+  gpt_model?: string;
+  api_call_method?: string;
+  primaryLanguage?: string;
+  secondaryLanguage?: string;
+  deepgram_api_key?: string;
+  local_asr_config?: LocalAsrSettings;
+}
+
 interface StoreSchema {
-  config: Record<string, any>;
+  config: AppConfig;
 }
 
 type TypedElectronStore = ElectronStore<StoreSchema> & {
@@ -165,10 +185,10 @@ type TypedElectronStore = ElectronStore<StoreSchema> & {
 const store = new ElectronStore<StoreSchema>() as TypedElectronStore;
 
 ipcMain.handle("get-config", () => {
-  return store.get("config");
+  return store.get("config") || {};
 });
 
-ipcMain.handle("set-config", (event, config) => {
+ipcMain.handle("set-config", (_event, config: AppConfig) => {
   store.set("config", config);
 });
 
@@ -217,6 +237,8 @@ app.on("before-quit", () => {
     api_call_method: config.api_call_method || "direct",
     primaryLanguage: config.primaryLanguage || "en",
     deepgram_api_key: config.deepgram_api_key || "",
+    secondaryLanguage: config.secondaryLanguage || "",
+    local_asr_config: config.local_asr_config || {},
   };
   store.clear();
   store.set("config", apiInfo);
@@ -409,73 +431,195 @@ function normalizeApiBaseUrl(url: string): string {
 }
 
 let deepgramConnection: any = null;
+let localAsrClient: LocalAsrClient | null = null;
+let activeTranscriptionEngine: "local" | "deepgram" | null = null;
+let transcriptionTarget: Electron.WebContents | null = null;
 
-ipcMain.handle("start-deepgram", async (event, config) => {
-  try {
-    if (!config.deepgram_key) {
-      throw new Error("Deepgram API key lose");
+const emitStatus = (engine: "local" | "deepgram", status: "open" | "closed" | "connecting") => {
+  transcriptionTarget?.send("transcription-status", { engine, status });
+  if (engine === "deepgram") {
+    transcriptionTarget?.send("deepgram-status", { status });
+  }
+};
+
+const emitTranscript = (
+  engine: "local" | "deepgram",
+  payload: { transcript: string; isFinal?: boolean; confidence?: number }
+) => {
+  transcriptionTarget?.send("transcription-transcript", {
+    engine,
+    transcript: payload.transcript,
+    is_final: payload.isFinal ?? false,
+    isFinal: payload.isFinal,
+    confidence: payload.confidence,
+  });
+  if (engine === "deepgram") {
+    transcriptionTarget?.send("deepgram-transcript", {
+      transcript: payload.transcript,
+      is_final: payload.isFinal ?? true,
+    });
+  }
+};
+
+const emitError = (engine: "local" | "deepgram", error: Error | string) => {
+  const normalizedError = error instanceof Error ? error : new Error(String(error));
+  transcriptionTarget?.send("transcription-error", {
+    engine,
+    message: normalizedError.message,
+  });
+  if (engine === "deepgram") {
+    transcriptionTarget?.send("deepgram-error", normalizedError);
+  }
+};
+
+const cleanupLocalAsr = () => {
+  if (localAsrClient) {
+    localAsrClient.removeAllListeners();
+    localAsrClient.dispose();
+    localAsrClient = null;
+  }
+};
+
+const cleanupDeepgram = () => {
+  if (deepgramConnection) {
+    deepgramConnection.finish();
+    deepgramConnection = null;
+  }
+};
+
+const startLocalTranscription = async (
+  sender: Electron.WebContents,
+  config: AppConfig
+) => {
+  const localConfig = config.local_asr_config;
+  if (!localConfig?.enabled || !localConfig?.url) {
+    throw new Error("Local ASR engine is not configured");
+  }
+
+  cleanupLocalAsr();
+  cleanupDeepgram();
+
+  transcriptionTarget = sender;
+
+  localAsrClient = new LocalAsrClient({
+    url: localConfig.url,
+    sampleRate: 16000,
+    authToken: localConfig.auth_token,
+    language: config.primaryLanguage || "en",
+    chunkMs: localConfig.chunk_ms ?? 160,
+    handshakeTimeoutMs: localConfig.handshake_timeout_ms ?? 5000,
+  });
+
+  localAsrClient.on("status", ({ status }) => emitStatus("local", status));
+  localAsrClient.on("transcript", (payload) => {
+    if (payload.transcript) {
+      emitTranscript("local", payload);
     }
-    const deepgram = createClient(config.deepgram_key);
-    deepgramConnection = deepgram.listen.live({
-      punctuate: true,
-      interim_results: false,
-      model: "general",
-      language: config.primaryLanguage || "en",
-      encoding: "linear16",
-      sample_rate: 16000,
-      endpointing: 1500,
-    });
+  });
+  localAsrClient.on("error", (error) => emitError("local", error));
 
-    deepgramConnection.addListener(LiveTranscriptionEvents.Open, () => {
-      event.sender.send("deepgram-status", { status: "open" });
-    });
+  await localAsrClient.connect();
+  activeTranscriptionEngine = "local";
+  return { success: true, engine: "local" as const };
+};
 
-    deepgramConnection.addListener(LiveTranscriptionEvents.Close, () => {
-      event.sender.send("deepgram-status", { status: "closed" });
-    });
+const startDeepgramTranscription = async (
+  sender: Electron.WebContents,
+  config: AppConfig & { deepgram_key?: string }
+) => {
+  const key = config.deepgram_key || config.deepgram_api_key;
+  if (!key) {
+    throw new Error("Deepgram API key missing");
+  }
 
-    deepgramConnection.addListener(
-      LiveTranscriptionEvents.Transcript,
-      (data: any) => {
-        if (
-          data &&
-          data.is_final &&
-          data.channel &&
-          data.channel.alternatives &&
-          data.channel.alternatives[0]
-        ) {
-          const transcript = data.channel.alternatives[0].transcript;
-          if (transcript) {
-            event.sender.send("deepgram-transcript", {
-              transcript,
-              is_final: true,
-            });
-          }
+  cleanupDeepgram();
+  cleanupLocalAsr();
+
+  transcriptionTarget = sender;
+  emitStatus("deepgram", "connecting");
+
+  const deepgram = createClient(key);
+  deepgramConnection = deepgram.listen.live({
+    punctuate: true,
+    interim_results: false,
+    model: "general",
+    language: config.primaryLanguage || "en",
+    encoding: "linear16",
+    sample_rate: 16000,
+    endpointing: 1500,
+  });
+
+  deepgramConnection.addListener(LiveTranscriptionEvents.Open, () => {
+    emitStatus("deepgram", "open");
+  });
+
+  deepgramConnection.addListener(LiveTranscriptionEvents.Close, () => {
+    emitStatus("deepgram", "closed");
+  });
+
+  deepgramConnection.addListener(
+    LiveTranscriptionEvents.Transcript,
+    (data: any) => {
+      if (
+        data &&
+        data.is_final &&
+        data.channel &&
+        data.channel.alternatives &&
+        data.channel.alternatives[0]
+      ) {
+        const transcript = data.channel.alternatives[0].transcript;
+        if (transcript) {
+          emitTranscript("deepgram", {
+            transcript,
+            isFinal: true,
+            confidence: data.channel.alternatives[0].confidence,
+          });
         }
       }
-    );
+    }
+  );
 
-    deepgramConnection.addListener(
-      LiveTranscriptionEvents.Error,
-      (err: any) => {
-        event.sender.send("deepgram-error", err);
+  deepgramConnection.addListener(
+    LiveTranscriptionEvents.Error,
+    (err: any) => {
+      emitError("deepgram", err instanceof Error ? err : new Error(String(err)));
+    }
+  );
+
+  await new Promise((resolve, reject) => {
+    deepgramConnection.addListener(LiveTranscriptionEvents.Open, resolve);
+    deepgramConnection.addListener(LiveTranscriptionEvents.Error, reject);
+    setTimeout(() => reject(new Error("Deepgram timeout")), 10000);
+  });
+
+  activeTranscriptionEngine = "deepgram";
+  return { success: true, engine: "deepgram" as const };
+};
+
+type StartTranscriptionConfig = AppConfig & { deepgram_key?: string };
+
+const attemptLocalThenFallback = async (
+  sender: Electron.WebContents,
+  config: StartTranscriptionConfig
+) => {
+  if (config.local_asr_config?.enabled && config.local_asr_config?.url) {
+    try {
+      return await startLocalTranscription(sender, config);
+    } catch (error) {
+      emitError("local", error instanceof Error ? error : new Error(String(error)));
+      cleanupLocalAsr();
+      if (!(config.deepgram_key || config.deepgram_api_key)) {
+        throw error instanceof Error ? error : new Error(String(error));
       }
-    );
-
-    await new Promise((resolve, reject) => {
-      deepgramConnection.addListener(LiveTranscriptionEvents.Open, resolve);
-      deepgramConnection.addListener(LiveTranscriptionEvents.Error, reject);
-      setTimeout(() => reject(new Error("Deepgram timeout")), 10000);
-    });
-
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: error.message };
+    }
   }
-});
+  return startDeepgramTranscription(sender, config);
+};
 
-ipcMain.handle("send-audio-to-deepgram", async (event, audioData) => {
-  if (deepgramConnection) {
+const forwardAudioChunk = (audioData: ArrayBuffer) => {
+  if (activeTranscriptionEngine === "local" && localAsrClient?.ready) {
+    localAsrClient.sendAudio(audioData);
+  } else if (activeTranscriptionEngine === "deepgram" && deepgramConnection) {
     try {
       const buffer = Buffer.from(audioData);
       deepgramConnection.send(buffer);
@@ -483,12 +627,55 @@ ipcMain.handle("send-audio-to-deepgram", async (event, audioData) => {
       console.error("failed send data to Deepgram :", error);
     }
   }
+};
+
+ipcMain.handle("start-transcription", async (event, rawConfig: StartTranscriptionConfig) => {
+  transcriptionTarget = event.sender;
+  const config = rawConfig || {};
+  try {
+    const result = await attemptLocalThenFallback(event.sender, config);
+    return result;
+  } catch (error) {
+    const targetEngine =
+      activeTranscriptionEngine || (config.local_asr_config?.enabled ? "local" : "deepgram");
+    emitError(targetEngine as "local" | "deepgram", error instanceof Error ? error : new Error(String(error)));
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle("send-audio-chunk", async (_event, audioData) => {
+  forwardAudioChunk(audioData);
+});
+
+ipcMain.handle("stop-transcription", () => {
+  if (activeTranscriptionEngine === "local") {
+    cleanupLocalAsr();
+  } else if (activeTranscriptionEngine === "deepgram") {
+    cleanupDeepgram();
+  }
+  activeTranscriptionEngine = null;
+  transcriptionTarget = null;
+});
+
+// Backwards compatibility with legacy renderer calls
+ipcMain.handle("start-deepgram", async (event, config: StartTranscriptionConfig) => {
+  transcriptionTarget = event.sender;
+  try {
+    return await startDeepgramTranscription(event.sender, config);
+  } catch (error) {
+    emitError("deepgram", error instanceof Error ? error : new Error(String(error)));
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle("send-audio-to-deepgram", async (_event, audioData) => {
+  forwardAudioChunk(audioData);
 });
 
 ipcMain.handle("stop-deepgram", () => {
-  if (deepgramConnection) {
-    deepgramConnection.finish();
-    deepgramConnection = null;
+  cleanupDeepgram();
+  if (activeTranscriptionEngine === "deepgram") {
+    activeTranscriptionEngine = null;
   }
 });
 

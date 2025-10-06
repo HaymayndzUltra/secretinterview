@@ -79,7 +79,7 @@ Interview Assistant is an Electron-based application that captures system audio 
 
 ## Why Interview Assistant
 
-1. **Real-time Speech-to-Text**: Utilizes Deepgram API for real-time speech recognition.
+1. **Real-time Speech-to-Text**: Runs a local GPU-accelerated Whisper/ASR engine for sub-300&nbsp;ms streaming transcription and automatically falls back to Deepgram only when the local engine is unavailable.
 2. **Intelligent GPT Responses**: Integrates OpenAI's GPT model to provide instant, intelligent answer suggestions for interview questions. (Supports third-party APIs with forwarding addresses)
 3. **Content Management**: Users can upload their own files, including text, images, and PDF files, along with customized prompts, greatly customizing the style of GPT responses. These materials will be used to personalize GPT's answers.
 4. **Unified Context**: In the real-time response page, conversations are based on the knowledge page configuration, all within the same context, ensuring coherence and relevance of answers.
@@ -95,7 +95,7 @@ Click the link above to view the demo video
 
 Interview Assistant has the following advantages compared to other interview assistance tools:
 
-1. **Real-time Speech Recognition**: Using Deepgram API (new users get $200 credit), we provide faster and more accurate real-time transcription than traditional speech recognition.
+1. **Real-time Speech Recognition**: Primary transcription happens on-device with your RTX 4090 GPU. Deepgram API (new users get $200 credit) is kept as a backup if the local engine is offline.
 2. **Personalized Knowledge Base**: Users can upload their own resumes, personal information, and other documents. The GPT model will provide more personalized answer suggestions based on this information.
 3. **Cross-platform Support**: As an Electron application, it supports Windows and macOS.
 4. **Privacy Protection**: All data is processed locally and not uploaded to the cloud, protecting users' privacy.
@@ -115,7 +115,7 @@ This comparison table clearly shows the advantages of Interview Assistant compar
 
 1. Download the installation package suitable for your operating system from the Release page.
 2. Run Interview Assistant.
-3. Configure your OpenAI API key and Deepgram API key on the settings page.
+3. Configure your OpenAI API key, optional local ASR binary, and (fallback) Deepgram API key on the settings page.
 4. Start using the real-time interview assistance feature or manage your knowledge base.
 
 ## Configuration Instructions
@@ -123,7 +123,8 @@ This comparison table clearly shows the advantages of Interview Assistant compar
 To use Interview Assistant, you need:
 
 1. OpenAI API key: Can be obtained from https://platform.openai.com, or you can purchase a third-party API with a forwarding address which is also supported. Remember to select the forwarding checkbox, and you can click the test button to test after configuration.
-2. Deepgram API key: Please visit https://deepgram.com to register and obtain. New users get $200 free credit, and the homepage tutorial is simple.
+2. Local ASR engine (recommended): Provide the path to your GPU-enabled Whisper/ASR binary and model files. The application streams 16&nbsp;kHz PCM chunks (~64&nbsp;ms) to keep end-to-end latency below 300&nbsp;ms using GPU parallel inference.
+3. Deepgram API key (optional fallback): Please visit https://deepgram.com to register and obtain. New users get $200 free credit, and the homepage tutorial is simple.
 
 ![image-20240919163506505](https://cdn.jsdelivr.net/gh/filifili233/blogimg@master/uPic/image-20240919163506505.png)
 

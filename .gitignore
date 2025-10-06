@@ -95,6 +95,8 @@ out/
 **/node_modules/electron/**
 
 # Whisper files - large binary files that shouldn't be committed
-whisper/
-whisper/**
+whisper/*
 !whisper/.gitkeep
+!whisper/local_transcriber.py
+whisper/models/*
+!whisper/models/.gitkeep

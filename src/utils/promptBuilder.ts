@@ -1,4 +1,4 @@
-import { KnowledgeCategory, KnowledgeEntry, ProfileSummary } from '../contexts/KnowledgeBaseContext';
+import { KnowledgeCategory, KnowledgeEntry, KnowledgeDocumentsState, ProfileSummary } from '../contexts/KnowledgeBaseContext';
 
 export interface InterviewScenario {
   id: string;
@@ -91,7 +91,8 @@ export const INTERVIEW_SCENARIOS: InterviewScenario[] = [
 export function buildInterviewPrompt(
   profileSummary: ProfileSummary | null,
   scenario: InterviewScenario,
-  knowledgeBase?: Record<KnowledgeCategory, KnowledgeEntry[]>
+  knowledgeBase?: Record<KnowledgeCategory, KnowledgeEntry[]>,
+  knowledgeDocuments?: KnowledgeDocumentsState
 ): string {
   let prompt = `${scenario.systemPrompt}\n\n`;
 
@@ -136,6 +137,21 @@ export function buildInterviewPrompt(
   prompt += `- Suggest follow-up questions\n`;
   prompt += `- Offer insights on the candidate's responses\n`;
   prompt += `- Maintain consistency with the interview scenario focus\n`;
+
+  if (knowledgeDocuments) {
+    if (knowledgeDocuments.permanent.length > 0) {
+      prompt += `\n## Permanent Knowledge Base\n`;
+      knowledgeDocuments.permanent.forEach(document => {
+        prompt += `\n### ${document.title}\n`;
+        prompt += `${document.content.trim()}\n`;
+      });
+    }
+
+    if (knowledgeDocuments.project) {
+      prompt += `\n## Project Knowledge: ${knowledgeDocuments.project.title}\n`;
+      prompt += `${knowledgeDocuments.project.content.trim()}\n`;
+    }
+  }
 
   if (knowledgeBase) {
     const appendSection = (title: string, entries?: KnowledgeEntry[], limit: number = 5) => {

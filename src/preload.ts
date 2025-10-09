@@ -5,7 +5,7 @@ import path from 'path';
 contextBridge.exposeInMainWorld('electronAPI', {
   getConfig: () => ipcRenderer.invoke('get-config'),
   setConfig: (config: any) => ipcRenderer.invoke('set-config', config),
-  testAPIConfig: (config: any) => ipcRenderer.invoke('test-api-config', config),
+  testLocalLLMConfig: (config: any) => ipcRenderer.invoke('test-local-llm', config),
   parsePDF: (buffer: ArrayBuffer) => ipcRenderer.invoke('parsePDF', buffer),
   processImage: (path: string) => ipcRenderer.invoke('process-image', path),
   highlightCode: (code: string, language: string) => ipcRenderer.invoke('highlight-code', code, language),
@@ -18,7 +18,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
     removeListener: (channel: string, listener: (event: any, ...args: any[]) => void) => ipcRenderer.removeListener(channel, listener),
   },
-  callOpenAI: (params: any) => ipcRenderer.invoke('callOpenAI', params),
+  callLocalLLM: (params: any) => ipcRenderer.invoke('call-local-llm', params),
   loadAudioProcessor: (): Promise<string> => ipcRenderer.invoke('load-audio-processor'),
   getSystemAudioStream: () => ipcRenderer.invoke('get-system-audio-stream'),
   transcribeAudioFile: (filePath: string, config: any) => ipcRenderer.invoke('transcribe-audio-file', filePath, config),
@@ -30,4 +30,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   startLocalAsr: (options: any) => ipcRenderer.invoke('start-local-asr', options),
   stopLocalAsr: () => ipcRenderer.invoke('stop-local-asr'),
   sendAudioToLocalAsr: (audioBuffer: ArrayBuffer) => ipcRenderer.send('send-audio-to-local-asr', audioBuffer),
+  loadKnowledgeContext: () => ipcRenderer.invoke('load-knowledge-context'),
+  saveProjectKnowledge: (payload: { content: string; fileName?: string }) => ipcRenderer.invoke('save-project-knowledge', payload),
+  setActiveProject: (fileName: string) => ipcRenderer.invoke('set-active-project', fileName),
 });

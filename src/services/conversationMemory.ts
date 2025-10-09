@@ -13,7 +13,7 @@ export interface SummaryGenerationResult {
 }
 
 /**
- * Generates a conversation summary using OpenAI
+ * Generates a conversation summary using the configured local LLM
  */
 export async function generateConversationSummary(
   request: SummaryGenerationRequest
@@ -42,7 +42,7 @@ Please respond in the following JSON format:
   "tags": ["tag1", "tag2", "tag3"]
 }`;
 
-    const response = await window.electronAPI.callOpenAI({
+    const response = await window.electronAPI.callLocalLLM({
       config: config,
       messages: [
         { role: "system", content: "You are a helpful assistant that creates structured summaries for conversation memory." },
@@ -77,15 +77,13 @@ Please respond in the following JSON format:
 }
 
 /**
- * Generates embeddings for text using OpenAI
+ * Generates embeddings for text (placeholder implementation)
  */
 export async function generateEmbedding(text: string): Promise<number[]> {
   try {
     const config = await window.electronAPI.getConfig();
     
-    // For now, we'll use a simple hash-based approach since OpenAI embeddings API
-    // might not be available in all configurations
-    // In a production system, you'd call the embeddings API here
+    // Simple hash-based approach while offline embeddings are unavailable.
     
     // Simple hash-based "embedding" for demonstration
     const hash = text.split('').reduce((a, b) => {

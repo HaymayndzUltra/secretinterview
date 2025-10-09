@@ -9,7 +9,7 @@ Interview Assistant 是一款基于 Electron 的应用，可以捕获系统音�
 ## 为什么是Interview Assistant
 
 1. **实时语音转文字**: 利用 Deepgram API 实现实时语音识别。
-2. **智能 GPT 回答**: 集成 OpenAI 的 GPT 模型，为面试问题提供即时、智能的回答建议。(支持带转发地址的第三方API)
+2. **本地 LLM 回答**: 集成本地部署的 LLM 引擎（Ollama/LM Studio/vLLM），离线生成面试回答与建议，无需任何外部 API。
 3. **内容管理**: 用户可以上传自己的文件，包括文本、图片和 PDF 文件，和你自己定制的提示词，可以极大的定制你想要GPT回应的风格，这些资料将用于个性化 GPT 的回答。
 4. **统一上下文**: 在实时回答页面中，对话基于知识页面的配置，都在同一个上下文中进行，确保回答的连贯性和相关性。
 5. **跨平台支持**: 作为 Electron 应用，可以在 Windows、macOS系统上运行。
@@ -45,15 +45,16 @@ Interview Assistant 相比其他面试辅助工具有以下优势：
 
 1. 从 Release 页面下载适合您操作系统的安装包。
 2. 运行 Interview Assistant。
-3. 在设置页面配置您的 OpenAI API 密钥和 Deepgram API 密钥。
+3. 在设置页面配置本地 LLM 服务（模型、URL 等）以及可选的 Deepgram 备用密钥。
 4. 开始使用实时面试辅助功能或管理您的知识库。
 
 ## 配置说明
 
 要使用 Interview Assistant，您需要：
 
-1. OpenAI API 密钥: 可以从 https://platform.openai.com 获取，或者可以购买第三方带有转发地址的API也同样支持，记得选择转发的复选框，配置完成后可以点击测试按钮进行测试。
-2. Deepgram API 密钥: 请访问 https://deepgram.com 注册并获取，新用户有200美元的免费额度，首页教程简单。
+1. 本地 LLM 服务: 确保 Ollama、LM Studio 或兼容的 HTTP 接口正在运行，并在设置中配置 Base URL、模型名称等参数。
+2. Deepgram API 密钥（可选）: 作为本地语音识别的备用方案，可访问 https://deepgram.com 注册获取。
+3. 知识库分层: `knowledge/permanent` 下的 Markdown 提供固定人格与流程，`knowledge/projects/current_project.md` 保存当前项目上下文，可按项目替换。
 
 ![image-20240919163506505](https://cdn.jsdelivr.net/gh/filifili233/blogimg@master/uPic/image-20240919163506505.png)
 
@@ -80,7 +81,7 @@ Interview Assistant is an Electron-based application that captures system audio 
 ## Why Interview Assistant
 
 1. **Real-time Speech-to-Text**: Runs a local GPU-accelerated Whisper/ASR engine for sub-300&nbsp;ms streaming transcription and automatically falls back to Deepgram only when the local engine is unavailable.
-2. **Intelligent GPT Responses**: Integrates OpenAI's GPT model to provide instant, intelligent answer suggestions for interview questions. (Supports third-party APIs with forwarding addresses)
+2. **Local LLM Responses**: Integrates an offline LLM engine (Ollama/LM Studio/vLLM compatible) to provide instant, intelligent interview guidance without any external APIs.
 3. **Content Management**: Users can upload their own files, including text, images, and PDF files, along with customized prompts, greatly customizing the style of GPT responses. These materials will be used to personalize GPT's answers.
 4. **Unified Context**: In the real-time response page, conversations are based on the knowledge page configuration, all within the same context, ensuring coherence and relevance of answers.
 5. **Cross-platform Support**: As an Electron application, it can run on Windows and macOS systems.
@@ -115,16 +116,17 @@ This comparison table clearly shows the advantages of Interview Assistant compar
 
 1. Download the installation package suitable for your operating system from the Release page.
 2. Run Interview Assistant.
-3. Configure your OpenAI API key, optional local ASR binary, and (fallback) Deepgram API key on the settings page.
+3. Configure your local LLM endpoint (model, base URL, options) and optional Deepgram fallback key on the settings page.
 4. Start using the real-time interview assistance feature or manage your knowledge base.
 
 ## Configuration Instructions
 
 To use Interview Assistant, you need:
 
-1. OpenAI API key: Can be obtained from https://platform.openai.com, or you can purchase a third-party API with a forwarding address which is also supported. Remember to select the forwarding checkbox, and you can click the test button to test after configuration.
+1. Local LLM endpoint: Run Ollama, LM Studio, vLLM, or any OpenAI-compatible local server and provide the base URL, model name, and sampling settings.
 2. Local ASR engine (recommended): Provide the path to your GPU-enabled Whisper/ASR binary and model files. The application streams 16&nbsp;kHz PCM chunks (~64&nbsp;ms) to keep end-to-end latency below 300&nbsp;ms using GPU parallel inference.
 3. Deepgram API key (optional fallback): Please visit https://deepgram.com to register and obtain. New users get $200 free credit, and the homepage tutorial is simple.
+4. Knowledge layers: Permanent Markdown files live in `knowledge/permanent`, while the active project context lives in `knowledge/projects/current_project.md`. Swap this file per engagement.
 
 ![image-20240919163506505](https://cdn.jsdelivr.net/gh/filifili233/blogimg@master/uPic/image-20240919163506505.png)
 

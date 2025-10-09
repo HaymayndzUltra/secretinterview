@@ -5,11 +5,14 @@ import { languageOptions } from '../utils/languageOptions';
 
 const Settings: React.FC = () => {
   const { error, setError, clearError } = useError();
-  const [apiKey, setApiKey] = useState('');
-  const [apiBase, setApiBase] = useState('');
-  const [apiModel, setApiModel] = useState('gpt-4o');
+  const [llmProvider, setLlmProvider] = useState<'ollama' | 'lmstudio' | 'vllm' | 'generic'>('ollama');
+  const [llmBaseUrl, setLlmBaseUrl] = useState('http://localhost:11434');
+  const [llmModel, setLlmModel] = useState('llama3.1:8b');
+  const [llmTemperature, setLlmTemperature] = useState('0.7');
+  const [llmTopP, setLlmTopP] = useState('0.9');
+  const [llmMaxTokens, setLlmMaxTokens] = useState('');
+  const [llmRequestPath, setLlmRequestPath] = useState('');
   const [saveSuccess, setSaveSuccess] = useState(false);
-  const [apiCallMethod, setApiCallMethod] = useState<'direct' | 'proxy'>('direct');
   const [testResult, setTestResult] = useState<string | null>(null);
   const [primaryLanguage, setPrimaryLanguage] = useState('auto');
   const [secondaryLanguage, setSecondaryLanguage] = useState('');
@@ -21,6 +24,7 @@ const Settings: React.FC = () => {
   const [localAsrChunkMs, setLocalAsrChunkMs] = useState(200);
   const [localAsrEndpointMs, setLocalAsrEndpointMs] = useState(800);
   const [localAsrExtraArgs, setLocalAsrExtraArgs] = useState('');
+  const [projectFile, setProjectFile] = useState('current_project.md');
 
   useEffect(() => {
     loadConfig();
@@ -29,10 +33,24 @@ const Settings: React.FC = () => {
   const loadConfig = async () => {
     try {
       const config = await window.electronAPI.getConfig();
-      setApiKey(config.openai_key || '');
-      setApiModel(config.gpt_model || 'gpt-4o');
-      setApiBase(config.api_base || '');
-      setApiCallMethod(config.api_call_method || 'direct');
+      const localLlm = config.localLlm || {};
+      setLlmProvider((localLlm.provider as 'ollama' | 'lmstudio' | 'vllm' | 'generic') || 'ollama');
+      setLlmBaseUrl(localLlm.baseUrl || 'http://localhost:11434');
+      setLlmModel(localLlm.model || 'llama3.1:8b');
+      setLlmTemperature(
+        typeof localLlm.temperature === 'number'
+          ? localLlm.temperature.toString()
+          : '0.7'
+      );
+      setLlmTopP(
+        typeof localLlm.topP === 'number'
+          ? localLlm.topP.toString()
+          : '0.9'
+      );
+      setLlmMaxTokens(
+        typeof localLlm.maxTokens === 'number' ? localLlm.maxTokens.toString() : ''
+      );
+      setLlmRequestPath(localLlm.requestPath || '');
       setPrimaryLanguage(config.primaryLanguage || 'auto');
       setSecondaryLanguage(config.secondaryLanguage || '');
       setDeepgramApiKey(config.deepgram_api_key || '');
@@ -44,6 +62,7 @@ const Settings: React.FC = () => {
       setLocalAsrChunkMs(localAsrConfig.chunkMilliseconds || 200);
       setLocalAsrEndpointMs(localAsrConfig.endpointMilliseconds || 800);
       setLocalAsrExtraArgs(localAsrConfig.extraArgs ? localAsrConfig.extraArgs.join(' ') : '');
+      setProjectFile(config.knowledge?.projectFile || 'current_project.md');
     } catch (err) {
       console.error('Failed to load configuration', err);
       setError('Failed to load configuration. Please check your settings.');
@@ -53,11 +72,20 @@ const Settings: React.FC = () => {
   const handleSave = async () => {
     try {
       await window.electronAPI.setConfig({
-        openai_key: apiKey,
-        gpt_model: apiModel,
-        api_base: apiBase,
-        api_call_method: apiCallMethod,
+        localLlm: {
+          provider: llmProvider,
+          baseUrl: llmBaseUrl,
+          model: llmModel,
+          temperature: Number(llmTemperature) || 0.7,
+          topP: Number(llmTopP) || 0.9,
+          maxTokens: llmMaxTokens === '' ? undefined : Number(llmMaxTokens),
+          requestPath: llmRequestPath.trim() || undefined,
+        },
+        knowledge: {
+          projectFile: projectFile.trim() || 'current_project.md',
+        },
         primaryLanguage: primaryLanguage,
+        secondaryLanguage: secondaryLanguage,
         deepgram_api_key: deepgramApiKey,
         localAsr: {
           enabled: localAsrEnabled,
@@ -81,221 +109,290 @@ const Settings: React.FC = () => {
     }
   };
 
-  const testAPIConfig = async () => {
+  const testLocalLlmConnection = async () => {
     try {
       setTestResult('Testing...');
-      console.log('Sending test-api-config request with config:', {
-        openai_key: apiKey,
-        gpt_model: apiModel,
-        api_base: apiBase,
+      const result = await window.electronAPI.testLocalLlmConfig({
+        provider: llmProvider,
+        baseUrl: llmBaseUrl,
+        model: llmModel,
+        temperature: Number(llmTemperature) || 0.7,
+        topP: Number(llmTopP) || 0.9,
+        maxTokens: llmMaxTokens === '' ? undefined : Number(llmMaxTokens),
+        requestPath: llmRequestPath.trim() || undefined,
       });
-      const result = await window.electronAPI.testAPIConfig({
-        openai_key: apiKey,
-        gpt_model: apiModel,
-        api_base: apiBase,
-      });
-      console.log('Received test-api-config result:', result);
       if (result.success) {
-        setTestResult('API configuration is valid!');
+        setTestResult('Local LLM connection is working!');
       } else {
-        setTestResult(`API configuration test failed: ${result.error || 'Unknown error'}`);
-        setError(`Failed to test API configuration: ${result.error || 'Unknown error'}`);
+        setTestResult(`Local LLM test failed: ${result.error || 'Unknown error'}`);
+        setError(`Failed to test local LLM configuration: ${result.error || 'Unknown error'}`);
       }
     } catch (err) {
-      console.error('API configuration test error:', err);
+      console.error('Local LLM test error:', err);
       const errorMessage = err instanceof Error ? err.message : 'Unknown error';
-      setTestResult(`API configuration test failed: ${errorMessage}`);
-      setError(`Failed to test API configuration: ${errorMessage}`);
+      setTestResult(`Local LLM test failed: ${errorMessage}`);
+      setError(`Failed to test local LLM configuration: ${errorMessage}`);
     }
   };
 
-  return (
-    <div className="max-w-2xl mx-auto p-4">
-      <ErrorDisplay error={error} onClose={clearError} />
-      <h1 className="text-2xl font-bold mb-4">Settings</h1>
-      <div className="mb-4">
-        <label className="label">API Key</label>
-        <input
-          type="password"
-          value={apiKey}
-          onChange={(e) => setApiKey(e.target.value)}
-          className="input input-bordered w-full"
-        />
-      </div>
-      <div className="mb-4">
-        <label className="label">API Base URL (Optional)</label>
-        <input
-          type="text"
-          value={apiBase}
-          onChange={(e) => setApiBase(e.target.value)}
-          className="input input-bordered w-full"
-        />
-        <label className="label">
-          <span className="label-text-alt">
-            Enter proxy URL if using API proxy. For example: https://your-proxy.com/v1
-          </span>
-        </label>
-      </div>
-      <div className="mb-4">
-        <label className="label">API Model</label>
-        <input
-          type="text"
-          value={apiModel}
-          onChange={(e) => setApiModel(e.target.value)}
-          className="input input-bordered w-full"
-        />
-        <label className="label">
-          <span className="label-text-alt">Please use a model supported by your API. Preferably gpt-4.</span>
-        </label>
-      </div>
-      <div className="mb-4">
-        <label className="label">API Call Method</label>
-        <select
-          value={apiCallMethod}
-          onChange={(e) => setApiCallMethod(e.target.value as 'direct' | 'proxy')}
-          className="select select-bordered w-full"
-        >
-          <option value="direct">Direct</option>
-          <option value="proxy">Proxy</option>
-        </select>
-      </div>
-      <div className="mb-4">
-        <label className="label">Deepgram API Key</label>
-        <input
-          type="password"
-          value={deepgramApiKey}
-          onChange={(e) => setDeepgramApiKey(e.target.value)}
-          className="input input-bordered w-full"
-        />
-      </div>
-      <div className="mb-4">
-        <label className="label flex justify-between items-center">
-          <span>Enable Local ASR (GPU)</span>
-          <input
-            type="checkbox"
-            className="toggle"
-            checked={localAsrEnabled}
-            onChange={(e) => setLocalAsrEnabled(e.target.checked)}
-          />
-        </label>
-        <p className="text-xs text-neutral-500">
-          Local Whisper/ASR engine streamed from your RTX 4090. When enabled, this becomes the primary transcription pipeline and
-          Deepgram is only used as a fallback.
-        </p>
-      </div>
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+
+return (
+  <div className="max-w-3xl mx-auto p-4 space-y-4">
+    <ErrorDisplay error={error} onClose={clearError} />
+    <h1 className="text-2xl font-bold">Settings</h1>
+
+    <div className="card bg-base-100 shadow">
+      <div className="card-body space-y-4">
         <div>
-          <label className="label">Local ASR Binary</label>
-          <input
-            type="text"
-            value={localAsrBinaryPath}
-            onChange={(e) => setLocalAsrBinaryPath(e.target.value)}
-            disabled={!localAsrEnabled}
-            className="input input-bordered w-full"
-            placeholder="/opt/local-asr/bin/server"
-          />
-          <label className="label">
-            <span className="label-text-alt">Absolute path to the streaming transcription executable.</span>
-          </label>
+          <h2 className="card-title">Local LLM Configuration</h2>
+          <p className="text-sm text-base-content/70">
+            Configure the offline model that powers all interview reasoning. Ensure the server is running before testing.
+          </p>
         </div>
-        <div>
-          <label className="label">Model Path</label>
-          <input
-            type="text"
-            value={localAsrModelPath}
-            onChange={(e) => setLocalAsrModelPath(e.target.value)}
-            disabled={!localAsrEnabled}
-            className="input input-bordered w-full"
-            placeholder="/opt/local-asr/models/whisper-large-v3"
-          />
-          <label className="label">
-            <span className="label-text-alt">Optional. Override the default model loaded by the binary.</span>
-          </label>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label className="label">Provider</label>
+              <select
+                className="select select-bordered w-full"
+                value={llmProvider}
+                onChange={(e) => setLlmProvider(e.target.value as 'ollama' | 'lmstudio' | 'vllm' | 'generic')}
+              >
+              <option value="ollama">Ollama</option>
+              <option value="lmstudio">LM Studio</option>
+              <option value="vllm">vLLM / OpenAI-compatible</option>
+              <option value="generic">Generic (OpenAI-compatible)</option>
+            </select>
+          </div>
+          <div>
+            <label className="label">Model</label>
+            <input
+              type="text"
+              className="input input-bordered w-full"
+              value={llmModel}
+              onChange={(e) => setLlmModel(e.target.value)}
+              placeholder="llama3.1:8b"
+            />
+          </div>
+          <div>
+            <label className="label">Base URL</label>
+            <input
+              type="text"
+              className="input input-bordered w-full"
+              value={llmBaseUrl}
+              onChange={(e) => setLlmBaseUrl(e.target.value)}
+              placeholder="http://localhost:11434"
+            />
+            <label className="label">
+              <span className="label-text-alt">Use your local inference server address.</span>
+            </label>
+          </div>
+          <div>
+            <label className="label">Request Path (optional)</label>
+            <input
+              type="text"
+              className="input input-bordered w-full"
+              value={llmRequestPath}
+              onChange={(e) => setLlmRequestPath(e.target.value)}
+              placeholder="/v1/chat/completions"
+            />
+          </div>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+          <div>
+            <label className="label">Temperature</label>
+            <input
+              type="number"
+              step="0.1"
+              className="input input-bordered w-full"
+              value={llmTemperature}
+              onChange={(e) => setLlmTemperature(e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="label">Top P</label>
+            <input
+              type="number"
+              step="0.05"
+              className="input input-bordered w-full"
+              value={llmTopP}
+              onChange={(e) => setLlmTopP(e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="label">Max Tokens</label>
+            <input
+              type="number"
+              className="input input-bordered w-full"
+              value={llmMaxTokens}
+              onChange={(e) => setLlmMaxTokens(e.target.value)}
+              placeholder="Unlimited"
+            />
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          <button onClick={testLocalLlmConnection} className="btn btn-secondary btn-sm">Test Local LLM</button>
+          {testResult && <span className="text-sm text-base-content/70">{testResult}</span>}
         </div>
       </div>
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
-        <div>
-          <label className="label">GPU Device</label>
-          <input
-            type="text"
-            value={localAsrDevice}
-            onChange={(e) => setLocalAsrDevice(e.target.value)}
-            disabled={!localAsrEnabled}
-            className="input input-bordered w-full"
-            placeholder="cuda:0"
-          />
-        </div>
-        <div>
-          <label className="label">Chunk Size (ms)</label>
-          <input
-            type="number"
-            value={localAsrChunkMs}
-            min={50}
-            max={2000}
-            onChange={(e) => setLocalAsrChunkMs(Number(e.target.value))}
-            disabled={!localAsrEnabled}
-            className="input input-bordered w-full"
-          />
-          <label className="label">
-            <span className="label-text-alt">Lower values reduce latency. 200 ms recommended.</span>
-          </label>
-        </div>
-        <div>
-          <label className="label">Endpoint (ms)</label>
-          <input
-            type="number"
-            value={localAsrEndpointMs}
-            min={200}
-            max={5000}
-            onChange={(e) => setLocalAsrEndpointMs(Number(e.target.value))}
-            disabled={!localAsrEnabled}
-            className="input input-bordered w-full"
-          />
-          <label className="label">
-            <span className="label-text-alt">Silence duration that finalizes a segment.</span>
-          </label>
-        </div>
-      </div>
-      <div className="mb-4">
-        <label className="label">Extra Engine Arguments</label>
-        <input
-          type="text"
-          value={localAsrExtraArgs}
-          onChange={(e) => setLocalAsrExtraArgs(e.target.value)}
-          disabled={!localAsrEnabled}
-          className="input input-bordered w-full"
-          placeholder="--threads 4 --beam-size 4"
-        />
-        <label className="label">
-          <span className="label-text-alt">Optional CLI flags separated by spaces. Used when spawning the local engine.</span>
-        </label>
-      </div>
-      <div className="mb-4">
-        <label className="label">Primary Language</label>
-        <select
-          value={primaryLanguage}
-          onChange={(e) => setPrimaryLanguage(e.target.value)}
-          className="select select-bordered w-full"
-        >
-          {languageOptions.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-      </div>
-      <div className="flex justify-between mt-4">
-        <button onClick={handleSave} className="btn btn-primary">
-          Save Settings
-        </button>
-        <button onClick={testAPIConfig} className="btn btn-secondary">
-          Test API Configuration
-        </button>
-      </div>
-      {saveSuccess && <p className="text-success mt-2">Settings saved successfully</p>}
-      {testResult && <p className={`mt-2 ${testResult.includes('valid') ? 'text-success' : 'text-error'}`}>{testResult}</p>}
     </div>
-  );
+
+    <div className="card bg-base-100 shadow">
+      <div className="card-body space-y-3">
+        <h2 className="card-title">Knowledge Layers</h2>
+        <p className="text-sm text-base-content/70">
+          Update the project knowledge file name if you maintain multiple client contexts. Replace the file on disk before starting a new session.
+        </p>
+        <div>
+          <label className="label">Project Knowledge File</label>
+          <input
+            type="text"
+            className="input input-bordered w-full"
+            value={projectFile}
+            onChange={(e) => setProjectFile(e.target.value)}
+            placeholder="current_project.md"
+          />
+          <label className="label">
+            <span className="label-text-alt">Located under <code>knowledge/projects</code>.</span>
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <div className="card bg-base-100 shadow">
+      <div className="card-body space-y-3">
+        <h2 className="card-title">Languages & Transcription</h2>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label className="label">Primary Language</label>
+            <select
+              value={primaryLanguage}
+              onChange={(e) => setPrimaryLanguage(e.target.value)}
+              className="select select-bordered w-full"
+            >
+              {languageOptions.map(option => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="label">Secondary Language</label>
+            <input
+              type="text"
+              value={secondaryLanguage}
+              onChange={(e) => setSecondaryLanguage(e.target.value)}
+              className="input input-bordered w-full"
+              placeholder="Optional fallback language"
+            />
+          </div>
+          <div>
+            <label className="label">Deepgram API Key (optional fallback)</label>
+            <input
+              type="password"
+              value={deepgramApiKey}
+              onChange={(e) => setDeepgramApiKey(e.target.value)}
+              className="input input-bordered w-full"
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div className="card bg-base-100 shadow">
+      <div className="card-body space-y-3">
+        <div className="flex items-center justify-between">
+          <h2 className="card-title">Local ASR Engine</h2>
+          <label className="label cursor-pointer gap-2">
+            <span className="label-text">Enable Local ASR (GPU)</span>
+            <input
+              type="checkbox"
+              className="toggle"
+              checked={localAsrEnabled}
+              onChange={(e) => setLocalAsrEnabled(e.target.checked)}
+            />
+          </label>
+        </div>
+        <p className="text-sm text-base-content/70">
+          When enabled, Whisper/ASR runs locally and Deepgram only triggers as a fallback.
+        </p>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label className="label">Local ASR Binary</label>
+            <input
+              type="text"
+              value={localAsrBinaryPath}
+              onChange={(e) => setLocalAsrBinaryPath(e.target.value)}
+              disabled={!localAsrEnabled}
+              className="input input-bordered w-full"
+              placeholder="/opt/local-asr/bin/server"
+            />
+          </div>
+          <div>
+            <label className="label">Model Path</label>
+            <input
+              type="text"
+              value={localAsrModelPath}
+              onChange={(e) => setLocalAsrModelPath(e.target.value)}
+              disabled={!localAsrEnabled}
+              className="input input-bordered w-full"
+              placeholder="/opt/local-asr/models/ggml-base.en.bin"
+            />
+          </div>
+          <div>
+            <label className="label">Device</label>
+            <input
+              type="text"
+              value={localAsrDevice}
+              onChange={(e) => setLocalAsrDevice(e.target.value)}
+              disabled={!localAsrEnabled}
+              className="input input-bordered w-full"
+              placeholder="cuda:0"
+            />
+          </div>
+          <div>
+            <label className="label">Extra Arguments</label>
+            <input
+              type="text"
+              value={localAsrExtraArgs}
+              onChange={(e) => setLocalAsrExtraArgs(e.target.value)}
+              disabled={!localAsrEnabled}
+              className="input input-bordered w-full"
+              placeholder="--beam-size 5 --hotwords 'tech 2.0'"
+            />
+          </div>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label className="label">Chunk Milliseconds</label>
+            <input
+              type="number"
+              value={localAsrChunkMs}
+              onChange={(e) => setLocalAsrChunkMs(Number(e.target.value))}
+              disabled={!localAsrEnabled}
+              className="input input-bordered w-full"
+            />
+          </div>
+          <div>
+            <label className="label">Endpoint Milliseconds</label>
+            <input
+              type="number"
+              value={localAsrEndpointMs}
+              onChange={(e) => setLocalAsrEndpointMs(Number(e.target.value))}
+              disabled={!localAsrEnabled}
+              className="input input-bordered w-full"
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div className="flex items-center gap-3 justify-end pt-2">
+      <button onClick={handleSave} className="btn btn-primary">Save Settings</button>
+      {saveSuccess && <span className="text-success">Saved!</span>}
+    </div>
+  </div>
+);
 };
 
 export default Settings;

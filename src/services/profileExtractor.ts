@@ -1,4 +1,5 @@
 import { ProfileSummary } from '../contexts/KnowledgeBaseContext';
+import { LlmMessage } from '../types/llm';
 
 export interface ProfileExtractionResult {
   success: boolean;
@@ -7,17 +8,14 @@ export interface ProfileExtractionResult {
 }
 
 /**
- * Extracts structured profile information from parsed file text using OpenAI function calling
+ * Extracts structured profile information from parsed file text using the local LLM engine
  * @param fileText - The parsed text content from uploaded files
  * @returns Promise<ProfileExtractionResult> - Structured profile data or error
  */
 export async function extractProfileFromText(fileText: string): Promise<ProfileExtractionResult> {
   try {
-    // Get the OpenAI configuration
-    const config = await window.electronAPI.getConfig();
-    
     // Create the prompt for profile extraction
-    const systemPrompt = `You are an expert at extracting structured information from resumes and CVs. 
+    const systemPrompt = `You are an expert at extracting structured information from resumes and CVs.
     Analyze the provided text and extract relevant information into the following categories:
     - Skills: Technical skills, programming languages, tools, frameworks, methodologies
     - Experience: Work history, job titles, companies, key responsibilities and achievements
@@ -37,26 +35,24 @@ export async function extractProfileFromText(fileText: string): Promise<ProfileE
 
     const userPrompt = `Please extract profile information from the following text:\n\n${fileText}`;
 
-    // Prepare messages for OpenAI API call
-    const messages = [
+    // Prepare messages for local LLM invocation
+    const messages: LlmMessage[] = [
       { role: "system", content: systemPrompt },
       { role: "user", content: userPrompt }
     ];
 
-    // Call OpenAI
-    const response = await window.electronAPI.callOpenAI({
-      config: config,
-      messages: messages
+    const response = await window.electronAPI.invokeLocalLlm({
+      messages
     });
 
     if ('error' in response) {
       return {
         success: false,
-        error: `OpenAI API error: ${response.error}`
+        error: `Local LLM error: ${response.error}`
       };
     }
 
-    // Parse the JSON response from OpenAI
+    // Parse the JSON response from the local LLM
     try {
       const extractedData = JSON.parse(response.content);
       

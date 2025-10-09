@@ -5,12 +5,12 @@ import ErrorDisplay from '../components/ErrorDisplay';
 import ProfileSummaryCard from '../components/ProfileSummaryCard';
 import TemplateSelector from '../components/TemplateSelector';
 import ConversationMemoryManager from '../components/ConversationMemoryManager';
-import OpenAI from 'openai';
 import ReactMarkdown from 'react-markdown';
 import { FaFile, FaImage } from 'react-icons/fa';
 import { extractProfileFromText } from '../services/profileExtractor';
 import { buildInterviewPrompt } from '../utils/promptBuilder';
 import { processConversationExchange } from '../services/conversationMemory';
+import { LlmMessage, LlmRole } from '../types/llm';
 
 interface UploadedFile extends File {
   pdfText?: string;
@@ -32,7 +32,8 @@ const KnowledgeBase: React.FC = () => {
     selectedScenario,
     templateContent,
     addConversationSummary,
-    getRelevantSummaries
+    getRelevantSummaries,
+    knowledgeLayers
   } = useKnowledgeBase();
   const { error, setError, clearError } = useError();
   const [chatInput, setChatInput] = useState("");
@@ -208,7 +209,7 @@ const KnowledgeBase: React.FC = () => {
       const config = await window.electronAPI.getConfig();
       
       // Build the system prompt using the prompt builder
-      let systemPrompt = buildInterviewPrompt(profileSummary, selectedScenario, knowledgeBase);
+      let systemPrompt = buildInterviewPrompt(profileSummary, selectedScenario, knowledgeBase, knowledgeLayers);
       
       // Merge template content if available
       if (templateContent) {
@@ -233,26 +234,27 @@ const KnowledgeBase: React.FC = () => {
         });
       }
       
-      const knowledgeMessages: OpenAI.Chat.ChatCompletionMessageParam[] = knowledgeEntriesForPrompt.map(entry => {
+      const knowledgeMessages: LlmMessage[] = knowledgeEntriesForPrompt.map(entry => {
         if (entry.content.startsWith('data:image')) {
           return {
             role: "user",
-            content: [{ type: "image_url", image_url: { url: entry.content } } as const],
-          } as OpenAI.Chat.ChatCompletionUserMessageParam;
+            content: `[${entry.category.toUpperCase()} | confidence:${entry.confidence.toFixed(2)}] Image reference stored in knowledge base. Ask for a description if required.`,
+          };
         }
 
         const formattedContent = `[${entry.category.toUpperCase()} | confidence:${entry.confidence.toFixed(2)}] ${entry.content}`;
-        return { role: "user", content: formattedContent } as OpenAI.Chat.ChatCompletionUserMessageParam;
+        return { role: "user", content: formattedContent };
       });
 
-      const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
+      const conversationMessages: LlmMessage[] = conversations.slice(-10).map(conv => ({
+        role: conv.role as LlmRole,
+        content: conv.content
+      }));
+
+      const messages: LlmMessage[] = [
         { role: "system", content: systemPrompt + conversationContext },
         ...knowledgeMessages,
-        // Only include recent conversations (last 5 exchanges) to avoid token limits
-        ...conversations.slice(-10).map(conv => ({
-          role: conv.role,
-          content: conv.content
-        }) as OpenAI.Chat.ChatCompletionMessageParam),
+        ...conversationMessages,
       ];
 
       if (fileContents.length > 0) {
@@ -260,21 +262,20 @@ const KnowledgeBase: React.FC = () => {
           if (content.startsWith('data:image')) {
             messages.push({
               role: "user",
-              content: [{ type: "image_url", image_url: { url: content } } as const]
-            } as OpenAI.Chat.ChatCompletionUserMessageParam);
+              content: `Image uploaded by user (base64 length ${content.length}). Summarize or ask for specifics as needed.`,
+            });
           } else {
-            messages.push({ role: "user", content: content } as OpenAI.Chat.ChatCompletionUserMessageParam);
+            messages.push({ role: "user", content: content });
           }
         }
       }
 
-      messages.push({ role: "user", content: userMessage } as OpenAI.Chat.ChatCompletionUserMessageParam);
+      messages.push({ role: "user", content: userMessage });
 
       setChatInput("");
       setUploadedFiles([]);
 
-      const response = await window.electronAPI.callOpenAI({
-        config: config,
+      const response = await window.electronAPI.invokeLocalLlm({
         messages: messages
       });
 
@@ -309,7 +310,7 @@ const KnowledgeBase: React.FC = () => {
         // Don't fail the main conversation if summary generation fails
       }
     } catch (error) {
-      setError('Failed to get response from GPT. Please try again.');
+      setError('Failed to get response from the local LLM. Please try again.');
       console.error('Detailed error:', error);
     } finally {
       setIsLoading(false);

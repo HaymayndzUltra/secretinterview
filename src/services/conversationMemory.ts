@@ -1,4 +1,5 @@
 import { ConversationSummary, KnowledgeCategory } from '../contexts/KnowledgeBaseContext';
+import { LlmMessage } from '../types/llm';
 
 export interface SummaryGenerationRequest {
   userMessage: string;
@@ -12,15 +13,10 @@ export interface SummaryGenerationResult {
   embedding?: number[];
 }
 
-/**
- * Generates a conversation summary using OpenAI
- */
 export async function generateConversationSummary(
   request: SummaryGenerationRequest
 ): Promise<SummaryGenerationResult> {
   try {
-    const config = await window.electronAPI.getConfig();
-    
     const summaryPrompt = `You are an AI assistant that creates concise summaries of conversations for long-term memory storage.
 
 Please analyze the following conversation exchange and create:
@@ -42,12 +38,13 @@ Please respond in the following JSON format:
   "tags": ["tag1", "tag2", "tag3"]
 }`;
 
-    const response = await window.electronAPI.callOpenAI({
-      config: config,
-      messages: [
-        { role: "system", content: "You are a helpful assistant that creates structured summaries for conversation memory." },
-        { role: "user", content: summaryPrompt }
-      ]
+    const messages: LlmMessage[] = [
+      { role: "system", content: "You are a helpful assistant that creates structured summaries for conversation memory." },
+      { role: "user", content: summaryPrompt }
+    ];
+
+    const response = await window.electronAPI.invokeLocalLlm({
+      messages,
     });
 
     if ('error' in response) {
@@ -77,15 +74,13 @@ Please respond in the following JSON format:
 }
 
 /**
- * Generates embeddings for text using OpenAI
+ * Generates embeddings for text.
+ * Placeholder implementation until a local embedding model is integrated.
  */
 export async function generateEmbedding(text: string): Promise<number[]> {
   try {
-    const config = await window.electronAPI.getConfig();
-    
-    // For now, we'll use a simple hash-based approach since OpenAI embeddings API
-    // might not be available in all configurations
-    // In a production system, you'd call the embeddings API here
+    // For now, we'll use a simple hash-based approach until a dedicated embedding
+    // model is configured in the local runtime.
     
     // Simple hash-based "embedding" for demonstration
     const hash = text.split('').reduce((a, b) => {

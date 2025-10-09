@@ -1,4 +1,4 @@
-import { KnowledgeCategory, KnowledgeEntry, ProfileSummary } from '../contexts/KnowledgeBaseContext';
+import { KnowledgeCategory, KnowledgeEntry, KnowledgeLayers, ProfileSummary } from '../contexts/KnowledgeBaseContext';
 
 export interface InterviewScenario {
   id: string;
@@ -91,7 +91,8 @@ export const INTERVIEW_SCENARIOS: InterviewScenario[] = [
 export function buildInterviewPrompt(
   profileSummary: ProfileSummary | null,
   scenario: InterviewScenario,
-  knowledgeBase?: Record<KnowledgeCategory, KnowledgeEntry[]>
+  knowledgeBase?: Record<KnowledgeCategory, KnowledgeEntry[]>,
+  knowledgeLayers?: KnowledgeLayers
 ): string {
   let prompt = `${scenario.systemPrompt}\n\n`;
 
@@ -157,6 +158,22 @@ export function buildInterviewPrompt(
     appendSection('Supporting Documents', knowledgeBase[KnowledgeCategory.Document], 3);
     appendSection('Follow-up Action Items', knowledgeBase[KnowledgeCategory.ActionItem], 3);
     appendSection('Feedback Insights', knowledgeBase[KnowledgeCategory.Feedback], 3);
+  }
+
+  if (knowledgeLayers) {
+    if (knowledgeLayers.permanent.length > 0) {
+      prompt += `\n## Permanent Knowledge Base\n\n`;
+      knowledgeLayers.permanent.forEach((doc) => {
+        prompt += `### ${doc.title}\n\n`;
+        prompt += `${doc.content.trim()}\n\n`;
+      });
+    }
+
+    if (knowledgeLayers.project) {
+      prompt += `\n## Active Project Context\n\n`;
+      prompt += `### ${knowledgeLayers.project.title}\n\n`;
+      prompt += `${knowledgeLayers.project.content.trim()}\n\n`;
+    }
   }
 
   return prompt;

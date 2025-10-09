@@ -18,6 +18,7 @@ import fs from "fs";
 import path from "path";
 import { Buffer } from "buffer";
 import { createClient, LiveTranscriptionEvents } from "@deepgram/sdk";
+import LocalAsrManager from "./local-asr/LocalAsrManager";
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
 import electronSquirrelStartup from "electron-squirrel-startup";
@@ -134,6 +135,9 @@ app.on("ready", createWindow);
 // for applications and their menu bar to stay active until the
 // dock icon is clicked and there are no other windows open.
 app.on("window-all-closed", () => {
+  localAsrManager.stopSession().catch((error) => {
+    console.warn("Failed to stop local ASR on window close", error);
+  });
   if (process.platform !== "darwin") {
     app.quit();
   }
@@ -163,6 +167,16 @@ type TypedElectronStore = ElectronStore<StoreSchema> & {
 };
 
 const store = new ElectronStore<StoreSchema>() as TypedElectronStore;
+const localAsrManager = new LocalAsrManager();
+
+try {
+  const initialConfig = store.get("config");
+  if (initialConfig && typeof initialConfig === "object") {
+    localAsrManager.configure(initialConfig.localAsr);
+  }
+} catch (error) {
+  console.error("Failed to initialize local ASR config", error);
+}
 
 ipcMain.handle("get-config", () => {
   return store.get("config");
@@ -170,6 +184,9 @@ ipcMain.handle("get-config", () => {
 
 ipcMain.handle("set-config", (event, config) => {
   store.set("config", config);
+  if (config && typeof config === "object") {
+    localAsrManager.configure(config.localAsr);
+  }
 });
 
 ipcMain.handle("parsePDF", async (event, pdfBuffer) => {
@@ -410,6 +427,20 @@ function normalizeApiBaseUrl(url: string): string {
 
 let deepgramConnection: any = null;
 
+localAsrManager.on("transcript", (payload) => {
+  const target = localAsrManager.getCurrentWebContents();
+  if (target) {
+    target.send("local-asr-transcript", payload);
+  }
+});
+
+localAsrManager.on("status", (payload) => {
+  const target = localAsrManager.getCurrentWebContents();
+  if (target) {
+    target.send("local-asr-status", payload);
+  }
+});
+
 ipcMain.handle("start-deepgram", async (event, config) => {
   try {
     if (!config.deepgram_key) {
@@ -474,7 +505,7 @@ ipcMain.handle("start-deepgram", async (event, config) => {
   }
 });
 
-ipcMain.handle("send-audio-to-deepgram", async (event, audioData) => {
+ipcMain.on("send-audio-to-deepgram", (event, audioData) => {
   if (deepgramConnection) {
     try {
       const buffer = Buffer.from(audioData);
@@ -490,6 +521,32 @@ ipcMain.handle("stop-deepgram", () => {
     deepgramConnection.finish();
     deepgramConnection = null;
   }
+});
+
+ipcMain.handle("check-local-asr", async () => {
+  return localAsrManager.getStatus();
+});
+
+ipcMain.handle("start-local-asr", async (event, options) => {
+  return localAsrManager.startSession(event.sender, {
+    language: options?.language,
+    sampleRate: options?.sampleRate ?? 16000,
+  });
+});
+
+ipcMain.on("send-audio-to-local-asr", (event, audioData) => {
+  const success = localAsrManager.sendAudioChunk(audioData);
+  if (!success) {
+    event.sender.send("local-asr-status", {
+      status: "error",
+      message: "Failed to send audio to local ASR engine",
+    });
+  }
+});
+
+ipcMain.handle("stop-local-asr", async () => {
+  await localAsrManager.stopSession();
+  return { success: true };
 });
 
 // Handle reading prompt template files

@@ -52,8 +52,13 @@ const InterviewPage: React.FC = () => {
   const [isAutoGPTEnabled, setIsAutoGPTEnabled] = useState(false);
   const [userMedia, setUserMedia] = useState<MediaStream | null>(null);
   const [audioContext, setAudioContext] = useState<AudioContext | null>(null);
-  const [processor, setProcessor] = useState<ScriptProcessorNode | null>(null);
+  const [processor, setProcessor] = useState<AudioWorkletNode | null>(null);
+  const workletModuleUrlRef = useRef<string | null>(null);
+  const silentGainNodeRef = useRef<GainNode | null>(null);
   const [autoSubmitTimer, setAutoSubmitTimer] = useState<NodeJS.Timeout | null>(null);
+  const [activeAsrEngine, setActiveAsrEngine] = useState<'local' | 'deepgram' | null>(null);
+  const [localAsrStatus, setLocalAsrStatus] = useState<any>(null);
+  const [localAsrLatency, setLocalAsrLatency] = useState<number | null>(null);
   const aiResponseRef = useRef<HTMLDivElement>(null);
   const [collapsedSegments, setCollapsedSegments] = useState<Record<string, boolean>>({});
   const wasNearBottomRef = useRef(true);
@@ -246,31 +251,49 @@ const InterviewPage: React.FC = () => {
     let lastTranscriptTime = Date.now();
     let checkTimer: NodeJS.Timeout | null = null;
 
-    const handleDeepgramTranscript = (_event: any, data: any) => {
-      if (data.transcript && data.is_final) {
-        setCurrentText((prev: string) => {
-          const newTranscript = data.transcript.trim();
-          if (!prev.endsWith(newTranscript)) {
-            lastTranscriptTime = Date.now();
-            const updatedText = prev + (prev ? '\n' : '') + newTranscript;
-            
-            if (isAutoGPTEnabled) {
-              if (autoSubmitTimer) {
-                clearTimeout(autoSubmitTimer);
-              }
-              const newTimer = setTimeout(() => {
-                const newContent = updatedText.slice(lastProcessedIndex);
-                if (newContent.trim()) {
-                  handleAskGPTStable(newContent);
-                }
-              }, 2000);
-              setAutoSubmitTimer(newTimer);
-            }
-            
-            return updatedText;
-          }
+    const handleTranscript = (_event: any, data: any) => {
+      if (!data?.transcript || !data.is_final) {
+        return;
+      }
+
+      setCurrentText((prev: string) => {
+        const newTranscript = data.transcript.trim();
+        if (!newTranscript) {
           return prev;
-        });
+        }
+        if (!prev.endsWith(newTranscript)) {
+          lastTranscriptTime = Date.now();
+          const updatedText = prev + (prev ? '\n' : '') + newTranscript;
+
+          if (isAutoGPTEnabled) {
+            if (autoSubmitTimer) {
+              clearTimeout(autoSubmitTimer);
+            }
+            const newTimer = setTimeout(() => {
+              const newContent = updatedText.slice(lastProcessedIndex);
+              if (newContent.trim()) {
+                handleAskGPTStable(newContent);
+              }
+            }, 2000);
+            setAutoSubmitTimer(newTimer);
+          }
+
+          return updatedText;
+        }
+        return prev;
+      });
+
+      if (typeof data.latency_ms === 'number') {
+        setLocalAsrLatency(data.latency_ms);
+      }
+    };
+
+    const handleStatus = (_event: any, status: any) => {
+      setLocalAsrStatus(status);
+      if (status?.status === 'error' && status?.message) {
+        setError(status.message);
+      } else if (status?.status === 'ready') {
+        clearError();
       }
     };
 
@@ -284,75 +307,58 @@ const InterviewPage: React.FC = () => {
       checkTimer = setTimeout(checkAndSubmit, 1000);
     };
 
-    window.electronAPI.ipcRenderer.on('deepgram-transcript', handleDeepgramTranscript);
+    const removeLocalTranscript = window.electronAPI.ipcRenderer.on('local-asr-transcript', handleTranscript);
+    const removeDeepgramTranscript = window.electronAPI.ipcRenderer.on('deepgram-transcript', handleTranscript);
+    const removeLocalStatus = window.electronAPI.ipcRenderer.on('local-asr-status', handleStatus);
     checkTimer = setTimeout(checkAndSubmit, 1000);
 
     return () => {
-      window.electronAPI.ipcRenderer.removeListener('deepgram-transcript', handleDeepgramTranscript);
+      if (removeLocalTranscript) removeLocalTranscript();
+      if (removeDeepgramTranscript) removeDeepgramTranscript();
+      if (removeLocalStatus) removeLocalStatus();
       if (checkTimer) {
         clearTimeout(checkTimer);
       }
     };
-  }, [isAutoGPTEnabled, lastProcessedIndex, currentText, handleAskGPTStable, setCurrentText, setLastProcessedIndex]);
+  }, [
+    isAutoGPTEnabled,
+    lastProcessedIndex,
+    currentText,
+    handleAskGPTStable,
+    setCurrentText,
+    setLastProcessedIndex,
+    autoSubmitTimer,
+    setAutoSubmitTimer,
+    setError,
+    clearError,
+  ]);
 
   const loadConfig = async () => {
     try {
       const config = await window.electronAPI.getConfig();
-      if (config && config.openai_key && config.deepgram_api_key) {
+      const localStatusResponse = await window.electronAPI.checkLocalAsrAvailability();
+      setLocalAsrStatus(localStatusResponse);
+      const hasOpenAI = Boolean(config && config.openai_key);
+      const hasLocal = Boolean(localStatusResponse && localStatusResponse.available);
+      const hasDeepgram = Boolean(config && config.deepgram_api_key);
+
+      if (hasOpenAI && (hasLocal || hasDeepgram)) {
         setIsConfigured(true);
+        clearError();
       } else {
-        setError("OpenAI API key or Deepgram API key not configured. Please check settings.");
+        setIsConfigured(false);
+        if (!hasOpenAI) {
+          setError('OpenAI API key not configured. Please check settings.');
+        } else {
+          setError('No transcription engine available. Configure a local ASR engine or provide a Deepgram API key.');
+        }
       }
     } catch (err) {
       setError("Failed to load configuration. Please check settings.");
     }
   };
 
-  const startRecording = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: false,
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          sampleRate: 16000,
-        },
-      });
-      setUserMedia(stream);
-
-      const config = await window.electronAPI.getConfig();
-      const result = await window.electronAPI.ipcRenderer.invoke('start-deepgram', {
-        deepgram_key: config.deepgram_api_key
-      });
-      if (!result.success) {
-        throw new Error(result.error);
-      }
-
-      const context = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-      setAudioContext(context);
-      const source = context.createMediaStreamSource(stream);
-      const processor = context.createScriptProcessor(4096, 1, 1);
-      setProcessor(processor);
-
-      source.connect(processor);
-      processor.connect(context.destination);
-
-      processor.onaudioprocess = (e: { inputBuffer: { getChannelData: (arg0: number) => any; }; }) => {
-        const inputData = e.inputBuffer.getChannelData(0);
-        const audioData = new Int16Array(inputData.length);
-        for (let i = 0; i < inputData.length; i++) {
-          audioData[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
-        }
-        window.electronAPI.ipcRenderer.invoke('send-audio-to-deepgram', audioData.buffer);
-      };
-
-      setIsRecording(true);
-    } catch (err: any) {
-      setError("Failed to start recording. Please check permissions or try again.");
-    }
-  };
-
-  const stopRecording = () => {
+  const stopRecording = useCallback(() => {
     if (userMedia) {
       userMedia.getTracks().forEach((track) => track.stop());
     }
@@ -360,13 +366,153 @@ const InterviewPage: React.FC = () => {
       audioContext.close();
     }
     if (processor) {
+      processor.port.onmessage = null;
       processor.disconnect();
     }
-    window.electronAPI.ipcRenderer.invoke('stop-deepgram');
+
+    if (silentGainNodeRef.current) {
+      silentGainNodeRef.current.disconnect();
+      silentGainNodeRef.current = null;
+    }
+
+    if (workletModuleUrlRef.current) {
+      URL.revokeObjectURL(workletModuleUrlRef.current);
+      workletModuleUrlRef.current = null;
+    }
+
+    if (activeAsrEngine === 'local') {
+      window.electronAPI.stopLocalAsr().catch(() => undefined);
+    } else if (activeAsrEngine === 'deepgram') {
+      window.electronAPI.ipcRenderer.invoke('stop-deepgram').catch(() => undefined);
+    }
+
     setIsRecording(false);
+    setActiveAsrEngine(null);
     setUserMedia(null);
     setAudioContext(null);
     setProcessor(null);
+  }, [userMedia, audioContext, processor, activeAsrEngine]);
+
+  const startRecording = async () => {
+    const sampleRate = 16000;
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: false,
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          sampleRate,
+        },
+      });
+      setUserMedia(stream);
+
+      const config = await window.electronAPI.getConfig();
+      const language = config?.primaryLanguage === 'auto' ? undefined : config?.primaryLanguage;
+      let selectedEngine: 'local' | 'deepgram' | null = null;
+      let localStartError: string | null = null;
+
+      let localResult: { success: boolean; error?: string } | null = null;
+      try {
+        localResult = await window.electronAPI.startLocalAsr({
+          language,
+          sampleRate,
+        });
+      } catch (localError: any) {
+        localStartError = localError?.message || 'Failed to start local ASR engine.';
+      }
+
+      if (localResult?.success) {
+        selectedEngine = 'local';
+      } else if (localResult?.error) {
+        localStartError = localResult.error;
+      }
+
+      if (!selectedEngine) {
+        if (config?.deepgram_api_key) {
+          const deepgramResult = await window.electronAPI.ipcRenderer.invoke('start-deepgram', {
+            deepgram_key: config.deepgram_api_key,
+            primaryLanguage: language,
+          });
+          if (!deepgramResult.success) {
+            throw new Error(deepgramResult.error || localStartError || 'Unable to start transcription engine.');
+          }
+          selectedEngine = 'deepgram';
+        } else {
+          throw new Error(localStartError || 'No transcription engine available. Configure local ASR or Deepgram.');
+        }
+      }
+
+      const context = new (window.AudioContext || window.webkitAudioContext)({ sampleRate });
+      setAudioContext(context);
+      const source = context.createMediaStreamSource(stream);
+      if (!context.audioWorklet) {
+        throw new Error('AudioWorklet not supported in this environment.');
+      }
+
+      const workletSource = `
+        class PCMWorkletProcessor extends AudioWorkletProcessor {
+          process(inputs) {
+            const input = inputs[0];
+            if (!input || !input[0]) {
+              return true;
+            }
+
+            const channelData = input[0];
+            const buffer = new Int16Array(channelData.length);
+            for (let i = 0; i < channelData.length; i++) {
+              let sample = channelData[i];
+              sample = Math.max(-1, Math.min(1, sample));
+              buffer[i] = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+            }
+
+            this.port.postMessage(buffer.buffer, [buffer.buffer]);
+            return true;
+          }
+        }
+
+        registerProcessor('pcm-worklet-processor', PCMWorkletProcessor);
+      `;
+
+      const workletBlob = new Blob([workletSource], { type: 'application/javascript' });
+      const workletModuleUrl = URL.createObjectURL(workletBlob);
+      workletModuleUrlRef.current = workletModuleUrl;
+      await context.audioWorklet.addModule(workletModuleUrl);
+
+      const workletNode = new AudioWorkletNode(context, 'pcm-worklet-processor');
+      setProcessor(workletNode);
+
+      const silentGain = context.createGain();
+      silentGain.gain.value = 0;
+      silentGainNodeRef.current = silentGain;
+
+      source.connect(workletNode);
+      workletNode.connect(silentGain);
+      silentGain.connect(context.destination);
+
+      workletNode.port.onmessage = (event: MessageEvent<ArrayBuffer>) => {
+        const audioBuffer = event.data;
+        if (!(audioBuffer instanceof ArrayBuffer)) {
+          return;
+        }
+
+        if (selectedEngine === 'local') {
+          window.electronAPI.sendAudioToLocalAsr(audioBuffer);
+        } else if (selectedEngine === 'deepgram') {
+          window.electronAPI.ipcRenderer.send('send-audio-to-deepgram', audioBuffer);
+        }
+      };
+
+      setActiveAsrEngine(selectedEngine);
+      setLocalAsrLatency(null);
+      if (selectedEngine === 'deepgram' && localStartError) {
+        console.warn('Local ASR unavailable, falling back to Deepgram:', localStartError);
+      }
+      setIsRecording(true);
+    } catch (err: any) {
+      console.error('Failed to start recording', err);
+      setError(err?.message || 'Failed to start recording. Please check permissions or try again.');
+      stopRecording();
+    }
   };
 
   useEffect(() => {
@@ -376,7 +522,8 @@ const InterviewPage: React.FC = () => {
         stopRecording();
       }
     };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isRecording, stopRecording]);
 
   useEffect(() => {
     const shouldAutoScroll = autoScrollEnabled && wasNearBottomRef.current;
@@ -468,6 +615,19 @@ const InterviewPage: React.FC = () => {
           />
           <span>Auto GPT</span>
         </label>
+      </div>
+      <div className="text-center text-xs text-neutral-500">
+        {activeAsrEngine ? (
+          <span>
+            {activeAsrEngine === 'local' ? 'Using local ASR engine' : 'Using Deepgram fallback'}
+            {typeof localAsrLatency === 'number' ? ` • Latest latency: ${Math.round(localAsrLatency)} ms` : ''}
+          </span>
+        ) : localAsrStatus ? (
+          <span>
+            {localAsrStatus.available ? 'Local ASR ready' : 'Local ASR unavailable'}
+            {localAsrStatus.statusMessage ? ` • ${localAsrStatus.statusMessage}` : ''}
+          </span>
+        ) : null}
       </div>
       <div className="flex flex-1 space-x-2 overflow-hidden">
         <div className="flex-1 flex flex-col bg-base-200 p-2 rounded-lg">

@@ -1,0 +1,71 @@
+{
+  "name": "interview-assistant",
+  "version": "1.0.0",
+  "description": "GPU-accelerated offline interview assistant with whisper streaming and two-stage LLM suggestions.",
+  "main": "dist/main/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "lint": "eslint . --ext .ts,.tsx",
+    "typecheck": "tsc --noEmit",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "build": {
+    "appId": "com.local.interviewassistant",
+    "files": [
+      "dist/**",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "knowledge",
+        "to": "knowledge"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.productivity"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
+  },
+  "dependencies": {
+    "better-sqlite3": "^9.0.0",
+    "electron-store": "^8.1.0",
+    "electron-updater": "^6.1.8",
+    "eventemitter3": "^5.0.1",
+    "fast-json-stable-stringify": "^2.1.0",
+    "node-cron": "^3.0.3",
+    "node-fetch": "^3.3.2",
+    "pino": "^8.17.0",
+    "pino-pretty": "^10.2.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tailwind-merge": "^2.3.0",
+    "use-hotkeys-hook": "^0.4.7"
+  },
+  "devDependencies": {
+    "@electron-toolkit/eslint-config": "^1.0.0",
+    "@electron-toolkit/preload": "^3.0.0",
+    "@electron-toolkit/utils": "^3.0.0",
+    "@types/node": "^20.12.7",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "autoprefixer": "^10.4.19",
+    "concurrently": "^8.2.2",
+    "electron": "^30.0.8",
+    "electron-builder": "^24.13.3",
+    "electron-vite": "^2.1.0",
+    "eslint": "^8.57.0",
+    "eslint-plugin-react": "^7.34.1",
+    "postcss": "^8.4.38",
+    "tailwindcss": "^3.4.4",
+    "tsx": "^4.7.2",
+    "typescript": "^5.4.5",
+    "vite": "^5.2.8"
+  }
+}

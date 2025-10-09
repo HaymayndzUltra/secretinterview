@@ -5,7 +5,6 @@ import ErrorDisplay from '../components/ErrorDisplay';
 import ProfileSummaryCard from '../components/ProfileSummaryCard';
 import TemplateSelector from '../components/TemplateSelector';
 import ConversationMemoryManager from '../components/ConversationMemoryManager';
-import OpenAI from 'openai';
 import ReactMarkdown from 'react-markdown';
 import { FaFile, FaImage } from 'react-icons/fa';
 import { extractProfileFromText } from '../services/profileExtractor';
@@ -32,7 +31,9 @@ const KnowledgeBase: React.FC = () => {
     selectedScenario,
     templateContent,
     addConversationSummary,
-    getRelevantSummaries
+    getRelevantSummaries,
+    knowledgeContext,
+    reloadKnowledgeContext
   } = useKnowledgeBase();
   const { error, setError, clearError } = useError();
   const [chatInput, setChatInput] = useState("");
@@ -206,9 +207,15 @@ const KnowledgeBase: React.FC = () => {
       addConversation({ role: "user", content: userMessage });
 
       const config = await window.electronAPI.getConfig();
-      
+
+      const unifiedKnowledge = knowledgeContext?.combined || '';
+
       // Build the system prompt using the prompt builder
-      let systemPrompt = buildInterviewPrompt(profileSummary, selectedScenario, knowledgeBase);
+      let systemPrompt = '';
+      if (unifiedKnowledge) {
+        systemPrompt += `${unifiedKnowledge}\n\n`;
+      }
+      systemPrompt += buildInterviewPrompt(profileSummary, selectedScenario, knowledgeBase);
       
       // Merge template content if available
       if (templateContent) {
@@ -233,47 +240,47 @@ const KnowledgeBase: React.FC = () => {
         });
       }
       
-      const knowledgeMessages: OpenAI.Chat.ChatCompletionMessageParam[] = knowledgeEntriesForPrompt.map(entry => {
+      const knowledgeMessages = knowledgeEntriesForPrompt.map(entry => {
         if (entry.content.startsWith('data:image')) {
           return {
-            role: "user",
-            content: [{ type: "image_url", image_url: { url: entry.content } } as const],
-          } as OpenAI.Chat.ChatCompletionUserMessageParam;
+            role: 'user' as const,
+            content: `[${entry.category.toUpperCase()} IMAGE] Visual reference stored in knowledge base.`
+          };
         }
 
         const formattedContent = `[${entry.category.toUpperCase()} | confidence:${entry.confidence.toFixed(2)}] ${entry.content}`;
-        return { role: "user", content: formattedContent } as OpenAI.Chat.ChatCompletionUserMessageParam;
+        return { role: 'user' as const, content: formattedContent };
       });
 
-      const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
-        { role: "system", content: systemPrompt + conversationContext },
+      const messages = [
+        { role: 'system' as const, content: systemPrompt + conversationContext },
         ...knowledgeMessages,
         // Only include recent conversations (last 5 exchanges) to avoid token limits
         ...conversations.slice(-10).map(conv => ({
-          role: conv.role,
+          role: conv.role as 'user' | 'assistant' | 'system',
           content: conv.content
-        }) as OpenAI.Chat.ChatCompletionMessageParam),
+        })),
       ];
 
       if (fileContents.length > 0) {
         for (const content of fileContents) {
           if (content.startsWith('data:image')) {
             messages.push({
-              role: "user",
-              content: [{ type: "image_url", image_url: { url: content } } as const]
-            } as OpenAI.Chat.ChatCompletionUserMessageParam);
+              role: 'user' as const,
+              content: '[IMAGE] Reference attached separately; describe insights verbally.'
+            });
           } else {
-            messages.push({ role: "user", content: content } as OpenAI.Chat.ChatCompletionUserMessageParam);
+            messages.push({ role: 'user' as const, content: content });
           }
         }
       }
 
-      messages.push({ role: "user", content: userMessage } as OpenAI.Chat.ChatCompletionUserMessageParam);
+      messages.push({ role: 'user' as const, content: userMessage });
 
       setChatInput("");
       setUploadedFiles([]);
 
-      const response = await window.electronAPI.callOpenAI({
+      const response = await window.electronAPI.invokeLocalLlm({
         config: config,
         messages: messages
       });
@@ -294,7 +301,8 @@ const KnowledgeBase: React.FC = () => {
         const { conversationSummary, knowledgeCategory } = await processConversationExchange(
           userMessage,
           response.content,
-          conversations.slice(-6) // Include recent context
+          conversations.slice(-6), // Include recent context
+          knowledgeContext?.combined
         );
         addConversationSummary(conversationSummary);
         addToKnowledgeBase({
@@ -309,7 +317,7 @@ const KnowledgeBase: React.FC = () => {
         // Don't fail the main conversation if summary generation fails
       }
     } catch (error) {
-      setError('Failed to get response from GPT. Please try again.');
+      setError('Failed to get response from the local model. Please try again.');
       console.error('Detailed error:', error);
     } finally {
       setIsLoading(false);
@@ -384,7 +392,7 @@ const KnowledgeBase: React.FC = () => {
           
           if (combinedTextContent.trim()) {
             console.log('Extracting profile from text content...');
-            const extractionResult = await extractProfileFromText(combinedTextContent);
+            const extractionResult = await extractProfileFromText(combinedTextContent, knowledgeContext?.combined);
             
             if (extractionResult.success && extractionResult.profileSummary) {
               console.log('Profile extraction successful:', extractionResult.profileSummary);
@@ -422,7 +430,17 @@ const KnowledgeBase: React.FC = () => {
     <div className="flex flex-col h-[calc(100vh-2.5rem)] p-2 max-w-4xl mx-auto">
       <style>{markdownStyles}</style>
       <ErrorDisplay error={error} onClose={clearError} />
-      <h1 className="text-xl font-bold mb-1">Knowledge Base Chat</h1>
+      <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-2 mb-2">
+        <div>
+          <h1 className="text-xl font-bold">Knowledge Base Chat</h1>
+          {knowledgeContext?.project?.title && (
+            <p className="text-sm text-base-content/70">Active project: {knowledgeContext.project.title}</p>
+          )}
+        </div>
+        <button className="btn btn-sm btn-outline self-start sm:self-auto" onClick={reloadKnowledgeContext}>
+          Reload Knowledge Files
+        </button>
+      </div>
       
       {/* Template Selector */}
       <TemplateSelector className="mb-4" />

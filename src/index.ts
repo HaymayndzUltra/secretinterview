@@ -11,7 +11,6 @@ import {
 declare const MAIN_WINDOW_WEBPACK_ENTRY: string;
 declare const MAIN_WINDOW_PRELOAD_WEBPACK_ENTRY: string;
 import Prism from "prismjs";
-import OpenAI from "openai";
 import axios from "axios";
 import FormData from "form-data";
 import fs from "fs";
@@ -19,6 +18,7 @@ import path from "path";
 import { Buffer } from "buffer";
 import { createClient, LiveTranscriptionEvents } from "@deepgram/sdk";
 import LocalAsrManager from "./local-asr/LocalAsrManager";
+import { invokeLocalLlm, testLocalLlm, LocalLlmConfig, LlmMessage } from "./local-llm/LocalLlmClient";
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
 import electronSquirrelStartup from "electron-squirrel-startup";
@@ -167,10 +167,136 @@ type TypedElectronStore = ElectronStore<StoreSchema> & {
 };
 
 const store = new ElectronStore<StoreSchema>() as TypedElectronStore;
+
+const DEFAULT_LOCAL_LLM_CONFIG: LocalLlmConfig = {
+  baseUrl: "http://localhost:11434",
+  model: "llama3.1:8b",
+  provider: "ollama",
+  temperature: 0.7,
+  topP: 0.9,
+};
+
+const DEFAULT_KNOWLEDGE_CONFIG = {
+  projectFile: "current_project.md",
+};
+
+function normalizeConfig(rawConfig: Record<string, any> = {}): Record<string, any> {
+  const localLlmRaw = rawConfig.localLlm || {};
+  const knowledgeRaw = rawConfig.knowledge || {};
+
+  const normalizedLocalLlm: LocalLlmConfig = {
+    baseUrl: localLlmRaw.baseUrl || DEFAULT_LOCAL_LLM_CONFIG.baseUrl,
+    model: localLlmRaw.model || DEFAULT_LOCAL_LLM_CONFIG.model,
+    provider: localLlmRaw.provider || DEFAULT_LOCAL_LLM_CONFIG.provider,
+    temperature:
+      typeof localLlmRaw.temperature === "number"
+        ? localLlmRaw.temperature
+        : DEFAULT_LOCAL_LLM_CONFIG.temperature,
+    topP:
+      typeof localLlmRaw.topP === "number"
+        ? localLlmRaw.topP
+        : DEFAULT_LOCAL_LLM_CONFIG.topP,
+    maxTokens:
+      typeof localLlmRaw.maxTokens === "number" ? localLlmRaw.maxTokens : undefined,
+    requestPath: typeof localLlmRaw.requestPath === "string" ? localLlmRaw.requestPath : undefined,
+  };
+
+  const normalizedKnowledge = {
+    projectFile: knowledgeRaw.projectFile || DEFAULT_KNOWLEDGE_CONFIG.projectFile,
+  };
+
+  return {
+    ...rawConfig,
+    localLlm: normalizedLocalLlm,
+    knowledge: normalizedKnowledge,
+    primaryLanguage: rawConfig.primaryLanguage || "en",
+    secondaryLanguage: rawConfig.secondaryLanguage || "",
+  };
+}
+
+const KNOWLEDGE_PERMANENT_FILES = [
+  "behavior_rules.md",
+  "response_style.md",
+  "language_tone_guide.md",
+  "ai_governor_framework.md",
+  "resume.md",
+];
+
+interface KnowledgeFileContent {
+  filename: string;
+  title: string;
+  content: string;
+}
+
+interface KnowledgeContextPayload {
+  permanent: KnowledgeFileContent[];
+  project: KnowledgeFileContent | null;
+  combined: string;
+}
+
+function resolveKnowledgePath(...segments: string[]): string {
+  return path.join(__dirname, "knowledge", ...segments);
+}
+
+function formatTitle(filename: string): string {
+  const name = filename.replace(/\.md$/i, "");
+  return name
+    .split(/[-_]/)
+    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+    .join(" ");
+}
+
+function readKnowledgeFile(filePath: string): KnowledgeFileContent | null {
+  try {
+    if (!fs.existsSync(filePath)) {
+      return null;
+    }
+    const content = fs.readFileSync(filePath, "utf-8");
+    const filename = path.basename(filePath);
+    return {
+      filename,
+      title: formatTitle(filename),
+      content,
+    };
+  } catch (error) {
+    console.error(`Failed to read knowledge file ${filePath}`, error);
+    return null;
+  }
+}
+
+function buildCombinedKnowledge(permanent: KnowledgeFileContent[], project: KnowledgeFileContent | null): string {
+  const sections: string[] = [];
+  permanent.forEach((file) => {
+    sections.push(`# ${file.title}\n\n${file.content.trim()}`);
+  });
+  if (project) {
+    sections.push(`# Project Context - ${project.title}\n\n${project.content.trim()}`);
+  }
+  return sections.join("\n\n");
+}
+
+function loadKnowledgeContext(projectFileName?: string): KnowledgeContextPayload {
+  const permanentFiles = KNOWLEDGE_PERMANENT_FILES.map((fileName) =>
+    readKnowledgeFile(resolveKnowledgePath("permanent", fileName))
+  ).filter((file): file is KnowledgeFileContent => Boolean(file));
+
+  const projectFilePath = resolveKnowledgePath(
+    "projects",
+    projectFileName || DEFAULT_KNOWLEDGE_CONFIG.projectFile
+  );
+  const projectFile = readKnowledgeFile(projectFilePath);
+
+  return {
+    permanent: permanentFiles,
+    project: projectFile,
+    combined: buildCombinedKnowledge(permanentFiles, projectFile),
+  };
+}
 const localAsrManager = new LocalAsrManager();
 
 try {
-  const initialConfig = store.get("config");
+  const initialConfig = normalizeConfig(store.get("config"));
+  store.set("config", initialConfig);
   if (initialConfig && typeof initialConfig === "object") {
     localAsrManager.configure(initialConfig.localAsr);
   }
@@ -179,14 +305,23 @@ try {
 }
 
 ipcMain.handle("get-config", () => {
-  return store.get("config");
+  const config = normalizeConfig(store.get("config"));
+  store.set("config", config);
+  return config;
 });
 
 ipcMain.handle("set-config", (event, config) => {
-  store.set("config", config);
-  if (config && typeof config === "object") {
-    localAsrManager.configure(config.localAsr);
+  const normalized = normalizeConfig(config);
+  store.set("config", normalized);
+  if (normalized && typeof normalized === "object") {
+    localAsrManager.configure(normalized.localAsr);
   }
+});
+
+ipcMain.handle("load-knowledge-context", () => {
+  const config = normalizeConfig(store.get("config"));
+  const projectFile = config.knowledge?.projectFile;
+  return loadKnowledgeContext(projectFile);
 });
 
 ipcMain.handle("parsePDF", async (event, pdfBuffer) => {
@@ -226,17 +361,17 @@ ipcMain.handle("highlightCode", async (event, code, language) => {
 });
 
 app.on("before-quit", () => {
-  const config = store.get("config") || {};
-  const apiInfo = {
-    openai_key: config.openai_key || "",
-    api_base: config.api_base || "",
-    gpt_model: config.gpt_model || "",
-    api_call_method: config.api_call_method || "direct",
-    primaryLanguage: config.primaryLanguage || "en",
+  const config = normalizeConfig(store.get("config"));
+  const persistedConfig = {
+    localLlm: config.localLlm,
+    knowledge: config.knowledge,
+    primaryLanguage: config.primaryLanguage,
+    secondaryLanguage: config.secondaryLanguage,
     deepgram_api_key: config.deepgram_api_key || "",
+    localAsr: config.localAsr,
   };
   store.clear();
-  store.set("config", apiInfo);
+  store.set("config", persistedConfig);
 });
 
 ipcMain.handle("get-system-audio-stream", async () => {
@@ -314,50 +449,12 @@ app.on("ready", () => {
   );
 });
 
-ipcMain.handle("test-api-config", async (event, config) => {
+ipcMain.handle("test-local-llm", async (event, localLlmConfig) => {
   try {
-    const axiosInstance = axios.create({
-      baseURL: normalizeApiBaseUrl(config.api_base),
-      headers: {
-        Authorization: `Bearer ${config.openai_key}`,
-        "Content-Type": "application/json",
-      },
-    });
-
-    const response = await axiosInstance.post("/chat/completions", {
-      model: config.gpt_model || "gpt-3.5-turbo",
-      messages: [{ role: "user", content: "Hello, this is a test." }],
-    });
-
-    if (
-      response.data.choices &&
-      response.data.choices[0] &&
-      response.data.choices[0].message
-    ) {
-      return { success: true };
-    } else {
-      return { success: false, error: "Unexpected API response structure" };
-    }
+    const normalized = normalizeConfig({ localLlm: localLlmConfig }).localLlm;
+    await testLocalLlm(normalized);
+    return { success: true };
   } catch (error) {
-    if (axios.isAxiosError(error)) {
-      if (error.response) {
-        return {
-          success: false,
-          error: `Server responded with error: ${error.response.status} ${error.response.statusText}`,
-        };
-      } else if (error.request) {
-        return {
-          success: false,
-          error:
-            "No response received from server. Please check your network connection and API base URL.",
-        };
-      } else {
-        return {
-          success: false,
-          error: `Error setting up the request: ${error.message}`,
-        };
-      }
-    }
     return {
       success: false,
       error: error instanceof Error ? error.message : "Unknown error occurred",
@@ -365,38 +462,38 @@ ipcMain.handle("test-api-config", async (event, config) => {
   }
 });
 
-ipcMain.handle("callOpenAI", async (event, { config, messages, signal }) => {
-  try {
-    const openai = new OpenAI({
-      apiKey: config.openai_key,
-      baseURL: normalizeApiBaseUrl(config.api_base),
-    });
-
-    const abortController = new AbortController();
-    if (signal) {
-      signal.addEventListener('abort', () => abortController.abort());
+ipcMain.handle(
+  "invoke-local-llm",
+  async (
+    event,
+    {
+      config,
+      messages,
+    }: {
+      config: Record<string, any>;
+      messages: LlmMessage[];
     }
+  ) => {
+    try {
+      const normalizedConfig = normalizeConfig(config);
+      const sanitizedMessages: LlmMessage[] = (messages || []).map((message) => ({
+        role: message.role,
+        content: typeof message.content === "string" ? message.content : String(message.content),
+      }));
 
-    const response = await openai.chat.completions.create({
-      model: config.gpt_model || "gpt-3.5-turbo",
-      messages: messages,
-    }, { signal: abortController.signal });
+      const response = await invokeLocalLlm({
+        config: normalizedConfig.localLlm,
+        messages: sanitizedMessages,
+      });
 
-    if (
-      !response.choices ||
-      !response.choices[0] ||
-      !response.choices[0].message
-    ) {
-      throw new Error("Unexpected API response structure");
+      return { content: response.content };
+    } catch (error) {
+      return {
+        error: error instanceof Error ? error.message : "Unknown error occurred",
+      };
     }
-    return { content: response.choices[0].message.content };
-  } catch (error) {
-    if (error.name === "AbortError") {
-      return { error: "AbortError" };
-    }
-    return { error: error.message || "Unknown error occurred" };
   }
-});
+);
 
 ipcMain.handle("get-desktop-sources", async () => {
   try {

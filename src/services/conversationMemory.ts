@@ -13,15 +13,18 @@ export interface SummaryGenerationResult {
 }
 
 /**
- * Generates a conversation summary using OpenAI
+ * Generates a conversation summary using the local LLM
  */
 export async function generateConversationSummary(
-  request: SummaryGenerationRequest
+  request: SummaryGenerationRequest,
+  unifiedKnowledgeContext?: string
 ): Promise<SummaryGenerationResult> {
   try {
     const config = await window.electronAPI.getConfig();
-    
-    const summaryPrompt = `You are an AI assistant that creates concise summaries of conversations for long-term memory storage.
+
+    const knowledgePrefix = unifiedKnowledgeContext ? `${unifiedKnowledgeContext}\n\n` : '';
+
+    const summaryPrompt = `${knowledgePrefix}You are an AI assistant that creates concise summaries of conversations for long-term memory storage.
 
 Please analyze the following conversation exchange and create:
 1. A concise summary (2-3 sentences) that captures the key points and outcomes
@@ -42,10 +45,13 @@ Please respond in the following JSON format:
   "tags": ["tag1", "tag2", "tag3"]
 }`;
 
-    const response = await window.electronAPI.callOpenAI({
+    const response = await window.electronAPI.invokeLocalLlm({
       config: config,
       messages: [
-        { role: "system", content: "You are a helpful assistant that creates structured summaries for conversation memory." },
+        {
+          role: "system",
+          content: `${knowledgePrefix}You are a helpful assistant that creates structured summaries for conversation memory. Always ground insights in the AI Governor Framework and respect existing knowledge.`
+        },
         { role: "user", content: summaryPrompt }
       ]
     });
@@ -77,15 +83,15 @@ Please respond in the following JSON format:
 }
 
 /**
- * Generates embeddings for text using OpenAI
+ * Generates embeddings for text using a lightweight hash (placeholder for local embeddings)
  */
 export async function generateEmbedding(text: string): Promise<number[]> {
   try {
     const config = await window.electronAPI.getConfig();
     
-    // For now, we'll use a simple hash-based approach since OpenAI embeddings API
-    // might not be available in all configurations
-    // In a production system, you'd call the embeddings API here
+    // For now, we'll use a simple hash-based approach since local embedding
+    // generation might differ between deployments
+    // In a production system, you'd call your embedding pipeline here
     
     // Simple hash-based "embedding" for demonstration
     const hash = text.split('').reduce((a, b) => {
@@ -164,13 +170,14 @@ export interface ProcessedConversationExchange {
 export async function processConversationExchange(
   userMessage: string,
   assistantResponse: string,
-  conversationHistory?: Array<{ role: string; content: string }>
+  conversationHistory?: Array<{ role: string; content: string }>,
+  unifiedKnowledgeContext?: string
 ): Promise<ProcessedConversationExchange> {
   const summaryData = await generateConversationSummary({
     userMessage,
     assistantResponse,
     conversationHistory
-  });
+  }, unifiedKnowledgeContext);
 
   // Generate embedding if requested
   if (summaryData.embedding === undefined) {

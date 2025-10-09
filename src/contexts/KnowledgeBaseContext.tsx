@@ -1,4 +1,4 @@
-import React, { createContext, useState, useContext, ReactNode, useEffect } from 'react';
+import React, { createContext, useState, useContext, ReactNode, useEffect, useCallback } from 'react';
 import { InterviewScenario, getScenarioById } from '../utils/promptBuilder';
 
 export enum KnowledgeCategory {
@@ -47,6 +47,18 @@ export interface ConversationSummary {
   };
 }
 
+export interface KnowledgeLayerContent {
+  filename: string;
+  title: string;
+  content: string;
+}
+
+export interface UnifiedKnowledgeContext {
+  permanent: KnowledgeLayerContent[];
+  project: KnowledgeLayerContent | null;
+  combined: string;
+}
+
 interface PromptTemplate {
   name: string;
   filename: string;
@@ -87,6 +99,8 @@ interface KnowledgeBaseContextType {
   deleteConversationSummary: (id: string) => void;
   clearConversationSummaries: () => void;
   getRelevantSummaries: (query: string, limit?: number) => Promise<ConversationSummary[]>;
+  knowledgeContext: UnifiedKnowledgeContext | null;
+  reloadKnowledgeContext: () => Promise<void>;
 }
 
 const KnowledgeBaseContext = createContext<KnowledgeBaseContextType | undefined>(undefined);
@@ -110,6 +124,16 @@ export const KnowledgeBaseProvider: React.FC<{ children: ReactNode }> = ({ child
   const [selectedTemplate, setSelectedTemplate] = useState<string | null>(null);
   const [templateContent, setTemplateContent] = useState<string | null>(null);
   const [conversationSummaries, setConversationSummaries] = useState<ConversationSummary[]>([]);
+  const [knowledgeContext, setKnowledgeContext] = useState<UnifiedKnowledgeContext | null>(null);
+
+  const reloadKnowledgeContext = useCallback(async () => {
+    try {
+      const payload = await window.electronAPI.loadKnowledgeContext();
+      setKnowledgeContext(payload);
+    } catch (error) {
+      console.error('Failed to load knowledge context:', error);
+    }
+  }, []);
 
   useEffect(() => {
     const savedKnowledgeBase = localStorage.getItem('knowledgeBase');
@@ -191,10 +215,11 @@ export const KnowledgeBaseProvider: React.FC<{ children: ReactNode }> = ({ child
         console.error('Failed to parse conversation summaries:', error);
       }
     }
-    
+
     // Load available templates on startup
     loadAvailableTemplates();
-  }, []);
+    reloadKnowledgeContext();
+  }, [reloadKnowledgeContext]);
 
   useEffect(() => {
     localStorage.setItem('knowledgeBase', JSON.stringify(knowledgeBase));
@@ -459,6 +484,8 @@ export const KnowledgeBaseProvider: React.FC<{ children: ReactNode }> = ({ child
         deleteConversationSummary,
         clearConversationSummaries,
         getRelevantSummaries,
+        knowledgeContext,
+        reloadKnowledgeContext,
       }}
     >
       {children}

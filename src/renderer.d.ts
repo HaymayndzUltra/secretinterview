@@ -3,7 +3,7 @@ export interface ElectronAPI {
   transcribeAudioFile(tempFilePath: any, arg1: { primaryLanguage: string; secondaryLanguage: string; api_base: any; openai_key: any; }): TranscriptionResult | PromiseLike<TranscriptionResult>;
   getConfig: () => Promise<any>;
   setConfig: (config: any) => Promise<void>;
-  testAPIConfig: (config: any) => Promise<{ success: boolean, error?: string }>;
+  testLocalLlmConfig: (config: any) => Promise<{ success: boolean, error?: string }>;
   startRecording: () => Promise<Array<{id: string, name: string, thumbnail: string}>>;
   parsePDF: (pdfBuffer: ArrayBuffer) => Promise<{ text: string, error?: string }>;
   processImage: (imagePath: string) => Promise<string>;
@@ -16,10 +16,9 @@ export interface ElectronAPI {
     on(channel: string, listener: (event: any, ...args: any[]) => void): () => void;
     removeListener(channel: string, listener: (...args: any[]) => void): void;
   };
-  callOpenAI: (params: {
+  invokeLocalLlm: (params: {
     config: any;
     messages: any[];
-    signal?: AbortSignal;
   }) => Promise<{ content: string } | { error: string }>;
   transcribeAudio: (audioBuffer: ArrayBuffer, config: any) => Promise<TranscriptionResult>;
   readPromptTemplate: (templateName: string) => Promise<{ content: string } | { error: string }>;
@@ -28,6 +27,11 @@ export interface ElectronAPI {
   startLocalAsr: (options: any) => Promise<{ success: boolean; error?: string }>;
   stopLocalAsr: () => Promise<{ success: boolean }>;
   sendAudioToLocalAsr: (audioBuffer: ArrayBuffer) => void;
+  loadKnowledgeContext: () => Promise<{
+    permanent: Array<{ filename: string; title: string; content: string }>;
+    project: { filename: string; title: string; content: string } | null;
+    combined: string;
+  }>;
 }
 
 declare global {

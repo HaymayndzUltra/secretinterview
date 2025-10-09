@@ -21,6 +21,13 @@ const Settings: React.FC = () => {
   const [localAsrChunkMs, setLocalAsrChunkMs] = useState(200);
   const [localAsrEndpointMs, setLocalAsrEndpointMs] = useState(800);
   const [localAsrExtraArgs, setLocalAsrExtraArgs] = useState('');
+  const [localLlmProvider, setLocalLlmProvider] = useState<'ollama' | 'openai-compatible'>('ollama');
+  const [localLlmEndpoint, setLocalLlmEndpoint] = useState('http://localhost:11434');
+  const [localLlmModel, setLocalLlmModel] = useState('llama3');
+  const [localLlmTemperature, setLocalLlmTemperature] = useState('0.7');
+  const [localLlmTopP, setLocalLlmTopP] = useState('0.9');
+  const [localLlmMaxTokens, setLocalLlmMaxTokens] = useState('');
+  const [localLlmTimeout, setLocalLlmTimeout] = useState('180000');
 
   useEffect(() => {
     loadConfig();
@@ -44,6 +51,30 @@ const Settings: React.FC = () => {
       setLocalAsrChunkMs(localAsrConfig.chunkMilliseconds || 200);
       setLocalAsrEndpointMs(localAsrConfig.endpointMilliseconds || 800);
       setLocalAsrExtraArgs(localAsrConfig.extraArgs ? localAsrConfig.extraArgs.join(' ') : '');
+      const localLlmConfig = config.localLlm || {};
+      setLocalLlmProvider(localLlmConfig.provider || 'ollama');
+      setLocalLlmEndpoint(localLlmConfig.baseUrl || 'http://localhost:11434');
+      setLocalLlmModel(localLlmConfig.model || 'llama3');
+      setLocalLlmTemperature(
+        localLlmConfig.temperature !== undefined
+          ? String(localLlmConfig.temperature)
+          : '0.7'
+      );
+      setLocalLlmTopP(
+        localLlmConfig.topP !== undefined
+          ? String(localLlmConfig.topP)
+          : '0.9'
+      );
+      setLocalLlmMaxTokens(
+        localLlmConfig.maxTokens !== undefined
+          ? String(localLlmConfig.maxTokens)
+          : ''
+      );
+      setLocalLlmTimeout(
+        localLlmConfig.requestTimeoutMs !== undefined
+          ? String(localLlmConfig.requestTimeoutMs)
+          : '180000'
+      );
     } catch (err) {
       console.error('Failed to load configuration', err);
       setError('Failed to load configuration. Please check your settings.');
@@ -52,6 +83,10 @@ const Settings: React.FC = () => {
 
   const handleSave = async () => {
     try {
+      const parsedTemperature = Number(localLlmTemperature);
+      const parsedTopP = Number(localLlmTopP);
+      const parsedMaxTokens = localLlmMaxTokens.trim() ? Number(localLlmMaxTokens) : undefined;
+      const parsedTimeout = localLlmTimeout.trim() ? Number(localLlmTimeout) : undefined;
       await window.electronAPI.setConfig({
         openai_key: apiKey,
         gpt_model: apiModel,
@@ -73,6 +108,15 @@ const Settings: React.FC = () => {
                 .filter(Boolean)
             : [],
         },
+        localLlm: {
+          provider: localLlmProvider,
+          baseUrl: localLlmEndpoint.trim(),
+          model: localLlmModel.trim(),
+          temperature: Number.isFinite(parsedTemperature) ? parsedTemperature : undefined,
+          topP: Number.isFinite(parsedTopP) ? parsedTopP : undefined,
+          maxTokens: parsedMaxTokens,
+          requestTimeoutMs: parsedTimeout,
+        },
       });
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 3000);
@@ -81,31 +125,34 @@ const Settings: React.FC = () => {
     }
   };
 
-  const testAPIConfig = async () => {
+  const testLocalLlmConnection = async () => {
     try {
-      setTestResult('Testing...');
-      console.log('Sending test-api-config request with config:', {
-        openai_key: apiKey,
-        gpt_model: apiModel,
-        api_base: apiBase,
-      });
-      const result = await window.electronAPI.testAPIConfig({
-        openai_key: apiKey,
-        gpt_model: apiModel,
-        api_base: apiBase,
-      });
-      console.log('Received test-api-config result:', result);
+      setTestResult('Testing local LLM...');
+      const payload = {
+        localLlm: {
+          provider: localLlmProvider,
+          baseUrl: localLlmEndpoint.trim(),
+          model: localLlmModel.trim(),
+          temperature: Number(localLlmTemperature),
+          topP: Number(localLlmTopP),
+          maxTokens: localLlmMaxTokens.trim() ? Number(localLlmMaxTokens) : undefined,
+          requestTimeoutMs: localLlmTimeout.trim() ? Number(localLlmTimeout) : undefined,
+        },
+      };
+      const result = await window.electronAPI.testLocalLlm(payload);
       if (result.success) {
-        setTestResult('API configuration is valid!');
+        setTestResult('Local LLM connection looks good!');
+        clearError();
       } else {
-        setTestResult(`API configuration test failed: ${result.error || 'Unknown error'}`);
-        setError(`Failed to test API configuration: ${result.error || 'Unknown error'}`);
+        const message = result.error || 'Unknown error';
+        setTestResult(`Local LLM test failed: ${message}`);
+        setError(`Failed to reach local LLM: ${message}`);
       }
     } catch (err) {
-      console.error('API configuration test error:', err);
+      console.error('Local LLM test error:', err);
       const errorMessage = err instanceof Error ? err.message : 'Unknown error';
-      setTestResult(`API configuration test failed: ${errorMessage}`);
-      setError(`Failed to test API configuration: ${errorMessage}`);
+      setTestResult(`Local LLM test failed: ${errorMessage}`);
+      setError(`Failed to reach local LLM: ${errorMessage}`);
     }
   };
 
@@ -113,8 +160,106 @@ const Settings: React.FC = () => {
     <div className="max-w-2xl mx-auto p-4">
       <ErrorDisplay error={error} onClose={clearError} />
       <h1 className="text-2xl font-bold mb-4">Settings</h1>
+      <section className="mb-6 p-4 border border-base-300 rounded-lg bg-base-200/40">
+        <h2 className="text-xl font-semibold mb-2">Local LLM Engine</h2>
+        <p className="text-sm text-neutral-500 mb-4">
+          Configure the offline model that powers the entire interview workflow. The assistant will
+          combine permanent knowledge, the active project file, and your conversation history before
+          sending prompts to this endpoint.
+        </p>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+          <div>
+            <label className="label">Engine Provider</label>
+            <select
+              value={localLlmProvider}
+              onChange={(e) => setLocalLlmProvider(e.target.value as 'ollama' | 'openai-compatible')}
+              className="select select-bordered w-full"
+            >
+              <option value="ollama">Ollama</option>
+              <option value="openai-compatible">OpenAI-Compatible (LM Studio, vLLM, etc.)</option>
+            </select>
+            <label className="label">
+              <span className="label-text-alt">Choose Ollama for the native /api/chat endpoint.</span>
+            </label>
+          </div>
+          <div>
+            <label className="label">Model Name</label>
+            <input
+              type="text"
+              value={localLlmModel}
+              onChange={(e) => setLocalLlmModel(e.target.value)}
+              className="input input-bordered w-full"
+              placeholder="llama3"
+            />
+            <label className="label">
+              <span className="label-text-alt">Exact model identifier configured in your local engine.</span>
+            </label>
+          </div>
+          <div className="md:col-span-2">
+            <label className="label">Endpoint URL</label>
+            <input
+              type="text"
+              value={localLlmEndpoint}
+              onChange={(e) => setLocalLlmEndpoint(e.target.value)}
+              className="input input-bordered w-full"
+              placeholder="http://localhost:11434"
+            />
+            <label className="label">
+              <span className="label-text-alt">The base URL where the local LLM server is listening.</span>
+            </label>
+          </div>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+          <div>
+            <label className="label">Temperature</label>
+            <input
+              type="number"
+              step="0.05"
+              value={localLlmTemperature}
+              onChange={(e) => setLocalLlmTemperature(e.target.value)}
+              className="input input-bordered w-full"
+            />
+          </div>
+          <div>
+            <label className="label">Top P</label>
+            <input
+              type="number"
+              step="0.05"
+              value={localLlmTopP}
+              onChange={(e) => setLocalLlmTopP(e.target.value)}
+              className="input input-bordered w-full"
+            />
+          </div>
+          <div>
+            <label className="label">Max Tokens (Optional)</label>
+            <input
+              type="number"
+              value={localLlmMaxTokens}
+              onChange={(e) => setLocalLlmMaxTokens(e.target.value)}
+              className="input input-bordered w-full"
+            />
+          </div>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
+          <div>
+            <label className="label">Request Timeout (ms)</label>
+            <input
+              type="number"
+              value={localLlmTimeout}
+              onChange={(e) => setLocalLlmTimeout(e.target.value)}
+              className="input input-bordered w-full"
+            />
+          </div>
+          <div className="md:col-span-2 flex flex-col md:flex-row md:items-center md:gap-4">
+            <button onClick={testLocalLlmConnection} className="btn btn-secondary mb-2 md:mb-0">
+              Test Local LLM Connection
+            </button>
+            {testResult && <span className="text-sm text-neutral-500">{testResult}</span>}
+          </div>
+        </div>
+      </section>
       <div className="mb-4">
-        <label className="label">API Key</label>
+        <label className="label">Cloud Whisper API Key (Optional)</label>
         <input
           type="password"
           value={apiKey}
@@ -123,7 +268,7 @@ const Settings: React.FC = () => {
         />
       </div>
       <div className="mb-4">
-        <label className="label">API Base URL (Optional)</label>
+        <label className="label">Cloud Whisper Base URL (Optional)</label>
         <input
           type="text"
           value={apiBase}
@@ -137,7 +282,7 @@ const Settings: React.FC = () => {
         </label>
       </div>
       <div className="mb-4">
-        <label className="label">API Model</label>
+        <label className="label">Cloud Whisper Model</label>
         <input
           type="text"
           value={apiModel}
@@ -149,7 +294,7 @@ const Settings: React.FC = () => {
         </label>
       </div>
       <div className="mb-4">
-        <label className="label">API Call Method</label>
+        <label className="label">Cloud Whisper Call Method</label>
         <select
           value={apiCallMethod}
           onChange={(e) => setApiCallMethod(e.target.value as 'direct' | 'proxy')}
@@ -284,16 +429,12 @@ const Settings: React.FC = () => {
           ))}
         </select>
       </div>
-      <div className="flex justify-between mt-4">
+      <div className="flex justify-end mt-4">
         <button onClick={handleSave} className="btn btn-primary">
           Save Settings
         </button>
-        <button onClick={testAPIConfig} className="btn btn-secondary">
-          Test API Configuration
-        </button>
       </div>
       {saveSuccess && <p className="text-success mt-2">Settings saved successfully</p>}
-      {testResult && <p className={`mt-2 ${testResult.includes('valid') ? 'text-success' : 'text-error'}`}>{testResult}</p>}
     </div>
   );
 };

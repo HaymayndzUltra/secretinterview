@@ -1,16 +1,17 @@
-import React, { useMemo, useState, useRef } from 'react';
+import React, { useMemo, useState, useRef, useEffect, useCallback } from 'react';
 import { useKnowledgeBase, ProfileSummary, KnowledgeCategory, KnowledgeEntry } from '../contexts/KnowledgeBaseContext';
 import { useError } from '../contexts/ErrorContext';
 import ErrorDisplay from '../components/ErrorDisplay';
 import ProfileSummaryCard from '../components/ProfileSummaryCard';
 import TemplateSelector from '../components/TemplateSelector';
 import ConversationMemoryManager from '../components/ConversationMemoryManager';
-import OpenAI from 'openai';
 import ReactMarkdown from 'react-markdown';
 import { FaFile, FaImage } from 'react-icons/fa';
 import { extractProfileFromText } from '../services/profileExtractor';
 import { buildInterviewPrompt } from '../utils/promptBuilder';
 import { processConversationExchange } from '../services/conversationMemory';
+import { loadUnifiedKnowledgeContext } from '../services/knowledgeContext';
+import { ChatMessage, KnowledgeLayer } from '../types/llm';
 
 interface UploadedFile extends File {
   pdfText?: string;
@@ -40,6 +41,8 @@ const KnowledgeBase: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
   const [selectedKnowledgeCategory, setSelectedKnowledgeCategory] = useState<KnowledgeCategory>(KnowledgeCategory.Profile);
+  const [permanentLayers, setPermanentLayers] = useState<KnowledgeLayer[]>([]);
+  const [projectLayer, setProjectLayer] = useState<KnowledgeLayer | null>(null);
 
   const categorizedKnowledgeEntries = useMemo(() => {
     const base = Object.values(KnowledgeCategory).reduce((acc, category) => {
@@ -67,6 +70,21 @@ const KnowledgeBase: React.FC = () => {
       .flatMap(category => categorizedKnowledgeEntries[category] || [])
       .slice(0, 12);
   }, [categorizedKnowledgeEntries]);
+
+  const reloadKnowledgeLayers = useCallback(async () => {
+    try {
+      const context = await loadUnifiedKnowledgeContext();
+      setPermanentLayers(context.permanent);
+      setProjectLayer(context.project);
+    } catch (err) {
+      console.error('Failed to load knowledge layers', err);
+      setError('Failed to load knowledge layers. Please verify the markdown files.');
+    }
+  }, [setError]);
+
+  useEffect(() => {
+    reloadKnowledgeLayers();
+  }, [reloadKnowledgeLayers]);
 
   const handleExportKnowledge = (category: KnowledgeCategory) => {
     const entries = categorizedKnowledgeEntries[category] || [];
@@ -206,13 +224,18 @@ const KnowledgeBase: React.FC = () => {
       addConversation({ role: "user", content: userMessage });
 
       const config = await window.electronAPI.getConfig();
-      
+
       // Build the system prompt using the prompt builder
       let systemPrompt = buildInterviewPrompt(profileSummary, selectedScenario, knowledgeBase);
-      
+
       // Merge template content if available
       if (templateContent) {
         systemPrompt = `${systemPrompt}\n\n## Additional Template Instructions\n\n${templateContent}`;
+      }
+
+      const knowledgeContext = await loadUnifiedKnowledgeContext();
+      if (knowledgeContext.unifiedPromptFragment.trim()) {
+        systemPrompt = `${systemPrompt}\n\n${knowledgeContext.unifiedPromptFragment}`;
       }
 
       // Get relevant conversation summaries
@@ -233,47 +256,49 @@ const KnowledgeBase: React.FC = () => {
         });
       }
       
-      const knowledgeMessages: OpenAI.Chat.ChatCompletionMessageParam[] = knowledgeEntriesForPrompt.map(entry => {
+
+      const knowledgeMessages: ChatMessage[] = knowledgeEntriesForPrompt.map(entry => {
+        const prefix = `[${entry.category.toUpperCase()} | confidence:${entry.confidence.toFixed(2)}${entry.tags.length ? ` | tags:${entry.tags.join(', ')}` : ''}]`;
         if (entry.content.startsWith('data:image')) {
           return {
-            role: "user",
-            content: [{ type: "image_url", image_url: { url: entry.content } } as const],
-          } as OpenAI.Chat.ChatCompletionUserMessageParam;
+            role: 'user',
+            content: `${prefix} Embedded image reference stored in the knowledge base.`,
+          };
         }
-
-        const formattedContent = `[${entry.category.toUpperCase()} | confidence:${entry.confidence.toFixed(2)}] ${entry.content}`;
-        return { role: "user", content: formattedContent } as OpenAI.Chat.ChatCompletionUserMessageParam;
+        return {
+          role: 'user',
+          content: `${prefix} ${entry.content}`,
+        };
       });
 
-      const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
-        { role: "system", content: systemPrompt + conversationContext },
+      const messages: ChatMessage[] = [
+        { role: 'system', content: `${systemPrompt}${conversationContext}` },
         ...knowledgeMessages,
-        // Only include recent conversations (last 5 exchanges) to avoid token limits
-        ...conversations.slice(-10).map(conv => ({
-          role: conv.role,
-          content: conv.content
-        }) as OpenAI.Chat.ChatCompletionMessageParam),
+        ...conversations.slice(-10).map((conv) => ({
+          role: (['assistant', 'system', 'user'].includes(conv.role) ? conv.role : 'user') as ChatMessage['role'],
+          content: conv.content,
+        })),
       ];
 
       if (fileContents.length > 0) {
         for (const content of fileContents) {
           if (content.startsWith('data:image')) {
             messages.push({
-              role: "user",
-              content: [{ type: "image_url", image_url: { url: content } } as const]
-            } as OpenAI.Chat.ChatCompletionUserMessageParam);
+              role: 'user',
+              content: `![Uploaded image for analysis](${content})`,
+            });
           } else {
-            messages.push({ role: "user", content: content } as OpenAI.Chat.ChatCompletionUserMessageParam);
+            messages.push({ role: 'user', content });
           }
         }
       }
 
-      messages.push({ role: "user", content: userMessage } as OpenAI.Chat.ChatCompletionUserMessageParam);
+      messages.push({ role: 'user', content: userMessage });
 
       setChatInput("");
       setUploadedFiles([]);
 
-      const response = await window.electronAPI.callOpenAI({
+      const response = await window.electronAPI.callLocalLlm({
         config: config,
         messages: messages
       });
@@ -309,7 +334,7 @@ const KnowledgeBase: React.FC = () => {
         // Don't fail the main conversation if summary generation fails
       }
     } catch (error) {
-      setError('Failed to get response from GPT. Please try again.');
+      setError('Failed to get response from the local model. Please try again.');
       console.error('Detailed error:', error);
     } finally {
       setIsLoading(false);
@@ -433,6 +458,57 @@ const KnowledgeBase: React.FC = () => {
         onUpdateProfile={handleUpdateProfile}
         onClearProfile={handleClearProfile}
       />
+
+      {/* Knowledge Layers */}
+      <section className="mb-4 space-y-4">
+        <div className="flex items-center justify-between flex-col sm:flex-row gap-2">
+          <div>
+            <h2 className="text-lg font-semibold">Knowledge Layers</h2>
+            <p className="text-sm text-base-content/70">
+              Permanent markdown files keep the assistant's personality stable, while the project
+              file provides the current client brief. Replace <code>current_project.md</code> before
+              starting a new engagement.
+            </p>
+          </div>
+          <button className="btn btn-sm" onClick={reloadKnowledgeLayers}>
+            Reload Markdown Files
+          </button>
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div className="border border-base-300 rounded-lg p-4 bg-base-200/40">
+            <h3 className="text-md font-semibold mb-2">Permanent Knowledge</h3>
+            {permanentLayers.length === 0 ? (
+              <p className="text-sm text-base-content/60">No permanent knowledge files detected.</p>
+            ) : (
+              <div className="space-y-4">
+                {permanentLayers.map((layer) => (
+                  <div key={layer.path} className="space-y-2">
+                    <h4 className="font-medium text-neutral-700">{layer.name}</h4>
+                    <div className="markdown-body border border-base-300 rounded-md bg-base-100 p-3 max-h-48 overflow-y-auto">
+                      <ReactMarkdown>{layer.content}</ReactMarkdown>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="border border-base-300 rounded-lg p-4 bg-base-200/40">
+            <h3 className="text-md font-semibold mb-2">Project Knowledge</h3>
+            {projectLayer ? (
+              <div className="space-y-2">
+                <h4 className="font-medium text-neutral-700">{projectLayer.name}</h4>
+                <div className="markdown-body border border-base-300 rounded-md bg-base-100 p-3 max-h-48 overflow-y-auto">
+                  <ReactMarkdown>{projectLayer.content}</ReactMarkdown>
+                </div>
+              </div>
+            ) : (
+              <p className="text-sm text-base-content/60">
+                No project file detected. Add <code>current_project.md</code> to load client context.
+              </p>
+            )}
+          </div>
+        </div>
+      </section>
 
       {/* Knowledge Base Overview */}
       <div className="card bg-base-100 shadow-md mb-4">

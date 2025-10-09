@@ -21,6 +21,19 @@ export interface KnowledgeEntry {
   relatedSummaryId?: string;
 }
 
+export interface KnowledgeDocument {
+  fileName: string;
+  title: string;
+  content: string;
+  path: string;
+}
+
+export interface KnowledgeDocumentsState {
+  permanent: KnowledgeDocument[];
+  project: KnowledgeDocument | null;
+  availableProjects: string[];
+}
+
 interface Conversation {
   role: string;
   content: string;
@@ -87,6 +100,9 @@ interface KnowledgeBaseContextType {
   deleteConversationSummary: (id: string) => void;
   clearConversationSummaries: () => void;
   getRelevantSummaries: (query: string, limit?: number) => Promise<ConversationSummary[]>;
+  knowledgeDocuments: KnowledgeDocumentsState;
+  refreshKnowledgeDocuments: () => Promise<void>;
+  saveProjectKnowledge: (content: string, fileName?: string) => Promise<void>;
 }
 
 const KnowledgeBaseContext = createContext<KnowledgeBaseContextType | undefined>(undefined);
@@ -110,6 +126,11 @@ export const KnowledgeBaseProvider: React.FC<{ children: ReactNode }> = ({ child
   const [selectedTemplate, setSelectedTemplate] = useState<string | null>(null);
   const [templateContent, setTemplateContent] = useState<string | null>(null);
   const [conversationSummaries, setConversationSummaries] = useState<ConversationSummary[]>([]);
+  const [knowledgeDocuments, setKnowledgeDocuments] = useState<KnowledgeDocumentsState>({
+    permanent: [],
+    project: null,
+    availableProjects: [],
+  });
 
   useEffect(() => {
     const savedKnowledgeBase = localStorage.getItem('knowledgeBase');
@@ -191,9 +212,10 @@ export const KnowledgeBaseProvider: React.FC<{ children: ReactNode }> = ({ child
         console.error('Failed to parse conversation summaries:', error);
       }
     }
-    
+
     // Load available templates on startup
     loadAvailableTemplates();
+    refreshKnowledgeDocuments();
   }, []);
 
   useEffect(() => {
@@ -358,6 +380,33 @@ export const KnowledgeBaseProvider: React.FC<{ children: ReactNode }> = ({ child
     }
   };
 
+  const refreshKnowledgeDocuments = async () => {
+    try {
+      const context = await window.electronAPI.loadKnowledgeContext();
+      setKnowledgeDocuments({
+        permanent: context?.permanent || [],
+        project: context?.project || null,
+        availableProjects: context?.availableProjects || [],
+      });
+    } catch (error) {
+      console.error('Failed to load knowledge documents', error);
+    }
+  };
+
+  const saveProjectKnowledge = async (content: string, fileName?: string) => {
+    try {
+      const response = await window.electronAPI.saveProjectKnowledge({ content, fileName });
+      if (response?.success) {
+        await refreshKnowledgeDocuments();
+      } else if (response?.error) {
+        throw new Error(response.error);
+      }
+    } catch (error) {
+      console.error('Failed to save project knowledge', error);
+      throw error;
+    }
+  };
+
   // Conversation summary management functions
   const addConversationSummary = (summary: ConversationSummary) => {
     setConversationSummaries(prev => [...prev, summary]);
@@ -459,6 +508,9 @@ export const KnowledgeBaseProvider: React.FC<{ children: ReactNode }> = ({ child
         deleteConversationSummary,
         clearConversationSummaries,
         getRelevantSummaries,
+        knowledgeDocuments,
+        refreshKnowledgeDocuments,
+        saveProjectKnowledge,
       }}
     >
       {children}

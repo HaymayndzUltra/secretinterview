@@ -3,13 +3,17 @@ import { useError } from '../contexts/ErrorContext';
 import ErrorDisplay from '../components/ErrorDisplay';
 import { languageOptions } from '../utils/languageOptions';
 
+type LocalLLMEngineOption = 'ollama' | 'lmstudio' | 'vllm' | 'openaiCompatible';
+
 const Settings: React.FC = () => {
   const { error, setError, clearError } = useError();
-  const [apiKey, setApiKey] = useState('');
-  const [apiBase, setApiBase] = useState('');
-  const [apiModel, setApiModel] = useState('gpt-4o');
+  const [engine, setEngine] = useState<LocalLLMEngineOption>('ollama');
+  const [baseUrl, setBaseUrl] = useState('');
+  const [model, setModel] = useState('');
+  const [temperature, setTemperature] = useState('0.7');
+  const [topP, setTopP] = useState('0.9');
+  const [maxTokens, setMaxTokens] = useState('1024');
   const [saveSuccess, setSaveSuccess] = useState(false);
-  const [apiCallMethod, setApiCallMethod] = useState<'direct' | 'proxy'>('direct');
   const [testResult, setTestResult] = useState<string | null>(null);
   const [primaryLanguage, setPrimaryLanguage] = useState('auto');
   const [secondaryLanguage, setSecondaryLanguage] = useState('');
@@ -21,6 +25,9 @@ const Settings: React.FC = () => {
   const [localAsrChunkMs, setLocalAsrChunkMs] = useState(200);
   const [localAsrEndpointMs, setLocalAsrEndpointMs] = useState(800);
   const [localAsrExtraArgs, setLocalAsrExtraArgs] = useState('');
+  const [projectFile, setProjectFile] = useState('current_project.md');
+  const [availableProjects, setAvailableProjects] = useState<string[]>([]);
+  const [newProjectName, setNewProjectName] = useState('');
 
   useEffect(() => {
     loadConfig();
@@ -29,10 +36,25 @@ const Settings: React.FC = () => {
   const loadConfig = async () => {
     try {
       const config = await window.electronAPI.getConfig();
-      setApiKey(config.openai_key || '');
-      setApiModel(config.gpt_model || 'gpt-4o');
-      setApiBase(config.api_base || '');
-      setApiCallMethod(config.api_call_method || 'direct');
+      const llmConfig = config?.llm || {};
+      setEngine(llmConfig.engine || 'ollama');
+      setBaseUrl(llmConfig.baseUrl || '');
+      setModel(llmConfig.model || '');
+      setTemperature(
+        typeof llmConfig.temperature === 'number'
+          ? llmConfig.temperature.toString()
+          : '0.7'
+      );
+      setTopP(
+        typeof llmConfig.topP === 'number'
+          ? llmConfig.topP.toString()
+          : '0.9'
+      );
+      setMaxTokens(
+        typeof llmConfig.maxTokens === 'number'
+          ? llmConfig.maxTokens.toString()
+          : '1024'
+      );
       setPrimaryLanguage(config.primaryLanguage || 'auto');
       setSecondaryLanguage(config.secondaryLanguage || '');
       setDeepgramApiKey(config.deepgram_api_key || '');
@@ -44,6 +66,16 @@ const Settings: React.FC = () => {
       setLocalAsrChunkMs(localAsrConfig.chunkMilliseconds || 200);
       setLocalAsrEndpointMs(localAsrConfig.endpointMilliseconds || 800);
       setLocalAsrExtraArgs(localAsrConfig.extraArgs ? localAsrConfig.extraArgs.join(' ') : '');
+      setProjectFile(config?.knowledge?.projectFile || 'current_project.md');
+
+      try {
+        const knowledgeContext = await window.electronAPI.loadKnowledgeContext();
+        if (knowledgeContext?.availableProjects) {
+          setAvailableProjects(knowledgeContext.availableProjects);
+        }
+      } catch (knowledgeError) {
+        console.warn('Failed to load knowledge context', knowledgeError);
+      }
     } catch (err) {
       console.error('Failed to load configuration', err);
       setError('Failed to load configuration. Please check your settings.');
@@ -52,13 +84,24 @@ const Settings: React.FC = () => {
 
   const handleSave = async () => {
     try {
+      const parsedTemperature = parseFloat(temperature);
+      const parsedTopP = parseFloat(topP);
+      const parsedMaxTokens = parseInt(maxTokens, 10);
       await window.electronAPI.setConfig({
-        openai_key: apiKey,
-        gpt_model: apiModel,
-        api_base: apiBase,
-        api_call_method: apiCallMethod,
-        primaryLanguage: primaryLanguage,
+        llm: {
+          engine,
+          baseUrl,
+          model,
+          temperature: Number.isFinite(parsedTemperature) ? parsedTemperature : undefined,
+          topP: Number.isFinite(parsedTopP) ? parsedTopP : undefined,
+          maxTokens: Number.isFinite(parsedMaxTokens) ? parsedMaxTokens : undefined,
+        },
+        primaryLanguage,
+        secondaryLanguage,
         deepgram_api_key: deepgramApiKey,
+        knowledge: {
+          projectFile,
+        },
         localAsr: {
           enabled: localAsrEnabled,
           binaryPath: localAsrBinaryPath,
@@ -81,83 +124,191 @@ const Settings: React.FC = () => {
     }
   };
 
-  const testAPIConfig = async () => {
+  const testLocalLLM = async () => {
     try {
       setTestResult('Testing...');
-      console.log('Sending test-api-config request with config:', {
-        openai_key: apiKey,
-        gpt_model: apiModel,
-        api_base: apiBase,
+      const parsedTemperature = parseFloat(temperature);
+      const parsedTopP = parseFloat(topP);
+      const parsedMaxTokens = parseInt(maxTokens, 10);
+      const result = await window.electronAPI.testLocalLLMConfig({
+        llm: {
+          engine,
+          baseUrl,
+          model,
+          temperature: Number.isFinite(parsedTemperature) ? parsedTemperature : undefined,
+          topP: Number.isFinite(parsedTopP) ? parsedTopP : undefined,
+          maxTokens: Number.isFinite(parsedMaxTokens) ? parsedMaxTokens : undefined,
+        },
       });
-      const result = await window.electronAPI.testAPIConfig({
-        openai_key: apiKey,
-        gpt_model: apiModel,
-        api_base: apiBase,
-      });
-      console.log('Received test-api-config result:', result);
       if (result.success) {
-        setTestResult('API configuration is valid!');
+        setTestResult('Local LLM connection is valid!');
       } else {
-        setTestResult(`API configuration test failed: ${result.error || 'Unknown error'}`);
-        setError(`Failed to test API configuration: ${result.error || 'Unknown error'}`);
+        setTestResult(`Local LLM test failed: ${result.error || 'Unknown error'}`);
+        setError(`Failed to test local LLM: ${result.error || 'Unknown error'}`);
       }
     } catch (err) {
-      console.error('API configuration test error:', err);
+      console.error('Local LLM configuration test error:', err);
       const errorMessage = err instanceof Error ? err.message : 'Unknown error';
-      setTestResult(`API configuration test failed: ${errorMessage}`);
-      setError(`Failed to test API configuration: ${errorMessage}`);
+      setTestResult(`Local LLM test failed: ${errorMessage}`);
+      setError(`Failed to test local LLM: ${errorMessage}`);
+    }
+  };
+
+  const handleProjectSelection = async (value: string) => {
+    setProjectFile(value);
+    try {
+      await window.electronAPI.setActiveProject(value);
+      const knowledgeContext = await window.electronAPI.loadKnowledgeContext();
+      if (knowledgeContext?.availableProjects) {
+        setAvailableProjects(knowledgeContext.availableProjects);
+      }
+    } catch (projectError) {
+      console.error('Failed to switch project knowledge', projectError);
+      setError('Failed to switch project knowledge file.');
+    }
+  };
+
+  const handleCreateProject = async () => {
+    const trimmedName = newProjectName.trim();
+    if (!trimmedName) {
+      return;
+    }
+    try {
+      const response = await window.electronAPI.setActiveProject(trimmedName);
+      if (response?.success) {
+        const sanitized = trimmedName.endsWith('.md') ? trimmedName : `${trimmedName}.md`;
+        setProjectFile(sanitized);
+        setNewProjectName('');
+        const knowledgeContext = await window.electronAPI.loadKnowledgeContext();
+        if (knowledgeContext?.availableProjects) {
+          setAvailableProjects(knowledgeContext.availableProjects);
+        }
+      } else if (response?.error) {
+        setError(response.error);
+      }
+    } catch (creationError) {
+      console.error('Failed to create project knowledge file', creationError);
+      setError('Failed to create project knowledge file.');
     }
   };
 
   return (
-    <div className="max-w-2xl mx-auto p-4">
+    <div className="max-w-2xl mx-auto p-4 space-y-6">
       <ErrorDisplay error={error} onClose={clearError} />
-      <h1 className="text-2xl font-bold mb-4">Settings</h1>
-      <div className="mb-4">
-        <label className="label">API Key</label>
-        <input
-          type="password"
-          value={apiKey}
-          onChange={(e) => setApiKey(e.target.value)}
-          className="input input-bordered w-full"
-        />
+      <div>
+        <h1 className="text-2xl font-bold mb-4">Settings</h1>
+        <div className="bg-base-200 rounded-lg p-4 space-y-4">
+          <h2 className="text-xl font-semibold">Local LLM Engine</h2>
+          <div>
+            <label className="label">Engine</label>
+            <select
+              value={engine}
+              onChange={(e) => setEngine(e.target.value as LocalLLMEngineOption)}
+              className="select select-bordered w-full"
+            >
+              <option value="ollama">Ollama</option>
+              <option value="lmstudio">LM Studio</option>
+              <option value="vllm">vLLM / OpenAI Compatible</option>
+              <option value="openaiCompatible">Generic OpenAI-Compatible</option>
+            </select>
+            <p className="text-xs text-neutral-500 mt-1">
+              Make sure the engine is running locally and accessible from this device.
+            </p>
+          </div>
+          <div>
+            <label className="label">Base URL</label>
+            <input
+              type="text"
+              value={baseUrl}
+              onChange={(e) => setBaseUrl(e.target.value)}
+              className="input input-bordered w-full"
+              placeholder={engine === 'ollama' ? 'http://localhost:11434' : 'http://localhost:1234'}
+            />
+            <p className="text-xs text-neutral-500 mt-1">
+              Examples: Ollama → http://localhost:11434, LM Studio → http://localhost:1234/v1
+            </p>
+          </div>
+          <div>
+            <label className="label">Model</label>
+            <input
+              type="text"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              className="input input-bordered w-full"
+              placeholder={engine === 'ollama' ? 'llama3.1' : 'gpt-4o-mini'}
+            />
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div>
+              <label className="label">Temperature</label>
+              <input
+                type="number"
+                step="0.1"
+                value={temperature}
+                onChange={(e) => setTemperature(e.target.value)}
+                className="input input-bordered w-full"
+              />
+            </div>
+            <div>
+              <label className="label">Top P</label>
+              <input
+                type="number"
+                step="0.05"
+                value={topP}
+                onChange={(e) => setTopP(e.target.value)}
+                className="input input-bordered w-full"
+              />
+            </div>
+            <div>
+              <label className="label">Max Tokens</label>
+              <input
+                type="number"
+                value={maxTokens}
+                onChange={(e) => setMaxTokens(e.target.value)}
+                className="input input-bordered w-full"
+              />
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button className="btn btn-outline" onClick={testLocalLLM}>Test Local LLM</button>
+            {testResult && <span className="text-sm text-neutral-600">{testResult}</span>}
+          </div>
+        </div>
       </div>
-      <div className="mb-4">
-        <label className="label">API Base URL (Optional)</label>
-        <input
-          type="text"
-          value={apiBase}
-          onChange={(e) => setApiBase(e.target.value)}
-          className="input input-bordered w-full"
-        />
-        <label className="label">
-          <span className="label-text-alt">
-            Enter proxy URL if using API proxy. For example: https://your-proxy.com/v1
-          </span>
-        </label>
-      </div>
-      <div className="mb-4">
-        <label className="label">API Model</label>
-        <input
-          type="text"
-          value={apiModel}
-          onChange={(e) => setApiModel(e.target.value)}
-          className="input input-bordered w-full"
-        />
-        <label className="label">
-          <span className="label-text-alt">Please use a model supported by your API. Preferably gpt-4.</span>
-        </label>
-      </div>
-      <div className="mb-4">
-        <label className="label">API Call Method</label>
-        <select
-          value={apiCallMethod}
-          onChange={(e) => setApiCallMethod(e.target.value as 'direct' | 'proxy')}
-          className="select select-bordered w-full"
-        >
-          <option value="direct">Direct</option>
-          <option value="proxy">Proxy</option>
-        </select>
+      <div className="bg-base-200 rounded-lg p-4 space-y-4">
+        <h2 className="text-xl font-semibold">Knowledge Layers</h2>
+        <div>
+          <label className="label">Active Project File</label>
+          <select
+            value={projectFile}
+            onChange={(e) => handleProjectSelection(e.target.value)}
+            className="select select-bordered w-full"
+          >
+            {[...new Set([projectFile, ...availableProjects])].map((file) => (
+              <option key={file} value={file}>
+                {file}
+              </option>
+            ))}
+          </select>
+          <p className="text-xs text-neutral-500 mt-1">
+            Update <code>{projectFile}</code> before each engagement to switch project context.
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={newProjectName}
+            onChange={(e) => setNewProjectName(e.target.value)}
+            className="input input-bordered flex-1"
+            placeholder="New project file name"
+          />
+          <button className="btn btn-outline" type="button" onClick={handleCreateProject}>
+            Create &amp; Activate
+          </button>
+        </div>
+        <p className="text-xs text-neutral-500">
+          Files are stored in <code>knowledge/project</code>. The active file is merged with permanent knowledge on every prompt.
+        </p>
       </div>
       <div className="mb-4">
         <label className="label">Deepgram API Key</label>
@@ -284,16 +435,22 @@ const Settings: React.FC = () => {
           ))}
         </select>
       </div>
+      <div className="mb-4">
+        <label className="label">Secondary Language (Optional)</label>
+        <input
+          type="text"
+          value={secondaryLanguage}
+          onChange={(e) => setSecondaryLanguage(e.target.value)}
+          className="input input-bordered w-full"
+          placeholder="Tagalog"
+        />
+      </div>
       <div className="flex justify-between mt-4">
         <button onClick={handleSave} className="btn btn-primary">
           Save Settings
         </button>
-        <button onClick={testAPIConfig} className="btn btn-secondary">
-          Test API Configuration
-        </button>
       </div>
       {saveSuccess && <p className="text-success mt-2">Settings saved successfully</p>}
-      {testResult && <p className={`mt-2 ${testResult.includes('valid') ? 'text-success' : 'text-error'}`}>{testResult}</p>}
     </div>
   );
 };

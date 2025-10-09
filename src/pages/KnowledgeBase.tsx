@@ -1,11 +1,10 @@
-import React, { useMemo, useState, useRef } from 'react';
+import React, { useMemo, useState, useRef, useEffect } from 'react';
 import { useKnowledgeBase, ProfileSummary, KnowledgeCategory, KnowledgeEntry } from '../contexts/KnowledgeBaseContext';
 import { useError } from '../contexts/ErrorContext';
 import ErrorDisplay from '../components/ErrorDisplay';
 import ProfileSummaryCard from '../components/ProfileSummaryCard';
 import TemplateSelector from '../components/TemplateSelector';
 import ConversationMemoryManager from '../components/ConversationMemoryManager';
-import OpenAI from 'openai';
 import ReactMarkdown from 'react-markdown';
 import { FaFile, FaImage } from 'react-icons/fa';
 import { extractProfileFromText } from '../services/profileExtractor';
@@ -18,12 +17,12 @@ interface UploadedFile extends File {
 }
 
 const KnowledgeBase: React.FC = () => {
-  const { 
+  const {
     knowledgeBase,
     addToKnowledgeBase,
     deleteKnowledgeEntry,
     conversations,
-    addConversation, 
+    addConversation,
     clearConversations,
     displayedAiResult,
     setDisplayedAiResult,
@@ -32,7 +31,10 @@ const KnowledgeBase: React.FC = () => {
     selectedScenario,
     templateContent,
     addConversationSummary,
-    getRelevantSummaries
+    getRelevantSummaries,
+    knowledgeDocuments,
+    saveProjectKnowledge,
+    refreshKnowledgeDocuments
   } = useKnowledgeBase();
   const { error, setError, clearError } = useError();
   const [chatInput, setChatInput] = useState("");
@@ -40,6 +42,9 @@ const KnowledgeBase: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
   const [selectedKnowledgeCategory, setSelectedKnowledgeCategory] = useState<KnowledgeCategory>(KnowledgeCategory.Profile);
+  const [projectDraft, setProjectDraft] = useState('');
+  const [isSavingProject, setIsSavingProject] = useState(false);
+  const [projectSaveStatus, setProjectSaveStatus] = useState<string | null>(null);
 
   const categorizedKnowledgeEntries = useMemo(() => {
     const base = Object.values(KnowledgeCategory).reduce((acc, category) => {
@@ -150,6 +155,39 @@ const KnowledgeBase: React.FC = () => {
     setProfileSummary(null);
   };
 
+  useEffect(() => {
+    if (knowledgeDocuments.project) {
+      setProjectDraft(knowledgeDocuments.project.content);
+    } else {
+      setProjectDraft('');
+    }
+    setProjectSaveStatus(null);
+  }, [knowledgeDocuments.project?.fileName, knowledgeDocuments.project?.content]);
+
+  const handleSaveProjectDocument = async () => {
+    try {
+      setIsSavingProject(true);
+      setProjectSaveStatus(null);
+      await saveProjectKnowledge(projectDraft, knowledgeDocuments.project?.fileName);
+      setProjectSaveStatus('Project knowledge saved.');
+      clearError();
+    } catch (saveError) {
+      console.error('Failed to save project knowledge document', saveError);
+      setError('Failed to save project knowledge document.');
+    } finally {
+      setIsSavingProject(false);
+    }
+  };
+
+  const handleRefreshKnowledgeDocuments = async () => {
+    try {
+      await refreshKnowledgeDocuments();
+    } catch (refreshError) {
+      console.error('Failed to refresh knowledge documents', refreshError);
+      setError('Failed to refresh knowledge documents.');
+    }
+  };
+
   const simulateTyping = (text: string) => {
     let i = 0;
     setDisplayedAiResult('');  
@@ -206,9 +244,14 @@ const KnowledgeBase: React.FC = () => {
       addConversation({ role: "user", content: userMessage });
 
       const config = await window.electronAPI.getConfig();
-      
+
       // Build the system prompt using the prompt builder
-      let systemPrompt = buildInterviewPrompt(profileSummary, selectedScenario, knowledgeBase);
+      let systemPrompt = buildInterviewPrompt(
+        profileSummary,
+        selectedScenario,
+        knowledgeBase,
+        knowledgeDocuments
+      );
       
       // Merge template content if available
       if (templateContent) {
@@ -233,49 +276,50 @@ const KnowledgeBase: React.FC = () => {
         });
       }
       
-      const knowledgeMessages: OpenAI.Chat.ChatCompletionMessageParam[] = knowledgeEntriesForPrompt.map(entry => {
+      const knowledgeMessages = knowledgeEntriesForPrompt.map(entry => {
         if (entry.content.startsWith('data:image')) {
           return {
-            role: "user",
-            content: [{ type: "image_url", image_url: { url: entry.content } } as const],
-          } as OpenAI.Chat.ChatCompletionUserMessageParam;
+            role: 'user' as const,
+            content: `[${entry.category.toUpperCase()} IMAGE] ${entry.tags.join(', ')}`,
+          };
         }
 
         const formattedContent = `[${entry.category.toUpperCase()} | confidence:${entry.confidence.toFixed(2)}] ${entry.content}`;
-        return { role: "user", content: formattedContent } as OpenAI.Chat.ChatCompletionUserMessageParam;
+        return { role: 'user' as const, content: formattedContent };
       });
 
-      const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
-        { role: "system", content: systemPrompt + conversationContext },
+      const recentConversationMessages = conversations.slice(-10).map(conv => ({
+        role: conv.role === 'assistant' ? 'assistant' as const : conv.role === 'system' ? 'system' as const : 'user' as const,
+        content: conv.content,
+      }));
+
+      const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+        { role: 'system', content: systemPrompt + conversationContext },
         ...knowledgeMessages,
-        // Only include recent conversations (last 5 exchanges) to avoid token limits
-        ...conversations.slice(-10).map(conv => ({
-          role: conv.role,
-          content: conv.content
-        }) as OpenAI.Chat.ChatCompletionMessageParam),
+        ...recentConversationMessages,
       ];
 
       if (fileContents.length > 0) {
         for (const content of fileContents) {
           if (content.startsWith('data:image')) {
             messages.push({
-              role: "user",
-              content: [{ type: "image_url", image_url: { url: content } } as const]
-            } as OpenAI.Chat.ChatCompletionUserMessageParam);
+              role: 'user',
+              content: `[Image attachment provided as data URI: ${content.substring(0, 40)}...]`,
+            });
           } else {
-            messages.push({ role: "user", content: content } as OpenAI.Chat.ChatCompletionUserMessageParam);
+            messages.push({ role: 'user', content });
           }
         }
       }
 
-      messages.push({ role: "user", content: userMessage } as OpenAI.Chat.ChatCompletionUserMessageParam);
+      messages.push({ role: 'user', content: userMessage });
 
       setChatInput("");
       setUploadedFiles([]);
 
-      const response = await window.electronAPI.callOpenAI({
-        config: config,
-        messages: messages
+      const response = await window.electronAPI.callLocalLLM({
+        config,
+        messages,
       });
 
       if ('error' in response) {
@@ -309,7 +353,7 @@ const KnowledgeBase: React.FC = () => {
         // Don't fail the main conversation if summary generation fails
       }
     } catch (error) {
-      setError('Failed to get response from GPT. Please try again.');
+      setError('Failed to get response from the local language model. Please try again.');
       console.error('Detailed error:', error);
     } finally {
       setIsLoading(false);
@@ -433,6 +477,86 @@ const KnowledgeBase: React.FC = () => {
         onUpdateProfile={handleUpdateProfile}
         onClearProfile={handleClearProfile}
       />
+
+      {/* Knowledge Layer Documents */}
+      <div className="card bg-base-100 shadow-md mb-4">
+        <div className="card-body p-4 space-y-4">
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+            <div>
+              <h2 className="card-title text-lg">Knowledge Layers</h2>
+              <p className="text-sm text-base-content/70">
+                Permanent playbooks plus the active project brief are merged into every prompt.
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <button type="button" className="btn btn-sm btn-outline" onClick={handleRefreshKnowledgeDocuments}>
+                Refresh
+              </button>
+            </div>
+          </div>
+          <div className="grid md:grid-cols-2 gap-4">
+            <div className="space-y-3 max-h-64 overflow-y-auto pr-1">
+              <h3 className="text-sm font-semibold text-base-content/80">Permanent References</h3>
+              {knowledgeDocuments.permanent.length === 0 ? (
+                <p className="text-xs text-base-content/60">No permanent documents found.</p>
+              ) : (
+                knowledgeDocuments.permanent.map(doc => (
+                  <div key={doc.fileName} className="border border-base-200 rounded-lg p-3 bg-base-200/40">
+                    <div className="text-xs font-semibold mb-2 text-base-content/80">{doc.title}</div>
+                    <ReactMarkdown className="markdown-body text-xs leading-tight space-y-2">
+                      {doc.content}
+                    </ReactMarkdown>
+                  </div>
+                ))
+              )}
+            </div>
+            <div className="flex flex-col">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-sm font-semibold text-base-content/80">Project Knowledge</h3>
+                <span className="text-xs text-base-content/60">
+                  {knowledgeDocuments.project?.fileName || 'No project file selected'}
+                </span>
+              </div>
+              <textarea
+                className="textarea textarea-bordered flex-1 min-h-[12rem]"
+                value={projectDraft}
+                onChange={(e) => {
+                  setProjectDraft(e.target.value);
+                  setProjectSaveStatus(null);
+                }}
+                placeholder="Project-specific goals, stakeholders, and constraints..."
+                disabled={!knowledgeDocuments.project}
+              />
+              <div className="flex items-center gap-2 mt-3">
+                <button
+                  type="button"
+                  className="btn btn-sm btn-primary"
+                  onClick={handleSaveProjectDocument}
+                  disabled={isSavingProject || !knowledgeDocuments.project}
+                >
+                  {isSavingProject ? 'Saving...' : 'Save Project Knowledge'}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-ghost"
+                  onClick={() => setProjectDraft(knowledgeDocuments.project?.content || '')}
+                  disabled={isSavingProject}
+                >
+                  Reset
+                </button>
+              </div>
+              {!knowledgeDocuments.project && (
+                <p className="text-xs text-base-content/60 mt-2">
+                  Set an active project file in Settings to enable editing.
+                </p>
+              )}
+              {projectSaveStatus && (
+                <p className="text-xs text-success mt-2">{projectSaveStatus}</p>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
 
       {/* Knowledge Base Overview */}
       <div className="card bg-base-100 shadow-md mb-4">

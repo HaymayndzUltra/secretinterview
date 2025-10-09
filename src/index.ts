@@ -11,7 +11,6 @@ import {
 declare const MAIN_WINDOW_WEBPACK_ENTRY: string;
 declare const MAIN_WINDOW_PRELOAD_WEBPACK_ENTRY: string;
 import Prism from "prismjs";
-import OpenAI from "openai";
 import axios from "axios";
 import FormData from "form-data";
 import fs from "fs";
@@ -22,6 +21,35 @@ import LocalAsrManager from "./local-asr/LocalAsrManager";
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
 import electronSquirrelStartup from "electron-squirrel-startup";
+
+type LocalLLMEngineType = "ollama" | "lmstudio" | "vllm" | "openaiCompatible";
+
+interface LocalLLMConfig {
+  engine: LocalLLMEngineType;
+  baseUrl: string;
+  model: string;
+  temperature?: number;
+  topP?: number;
+  maxTokens?: number;
+}
+
+interface KnowledgeLayerConfig {
+  projectFile?: string;
+}
+
+interface AppConfig {
+  llm: LocalLLMConfig;
+  primaryLanguage?: string;
+  secondaryLanguage?: string;
+  deepgram_api_key?: string;
+  localAsr?: Record<string, any>;
+  knowledge?: KnowledgeLayerConfig;
+  // Legacy fields retained for backward compatibility
+  openai_key?: string;
+  api_base?: string;
+  gpt_model?: string;
+  api_call_method?: string;
+}
 
 if (electronSquirrelStartup) {
   app.quit();
@@ -45,7 +73,7 @@ const createWindow = (): void => {
         responseHeaders: {
           ...details.responseHeaders,
           "Content-Security-Policy": [
-            "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; connect-src 'self' https://api.openai.com;",
+            "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; connect-src 'self' http://localhost:* https://localhost:* data:;",
           ],
         },
       });
@@ -157,7 +185,7 @@ app.on("activate", () => {
 import ElectronStore from "electron-store";
 
 interface StoreSchema {
-  config: Record<string, any>;
+  config: AppConfig;
 }
 
 type TypedElectronStore = ElectronStore<StoreSchema> & {
@@ -169,8 +197,315 @@ type TypedElectronStore = ElectronStore<StoreSchema> & {
 const store = new ElectronStore<StoreSchema>() as TypedElectronStore;
 const localAsrManager = new LocalAsrManager();
 
+const DEFAULT_PROJECT_FILE = "current_project.md";
+
+function ensureDirectoryExists(directoryPath: string) {
+  if (!fs.existsSync(directoryPath)) {
+    fs.mkdirSync(directoryPath, { recursive: true });
+  }
+}
+
+function getKnowledgeRoot(): string {
+  return path.join(app.getAppPath(), "knowledge");
+}
+
+function getPermanentKnowledgeDir(): string {
+  return path.join(getKnowledgeRoot(), "permanent");
+}
+
+function getProjectKnowledgeDir(): string {
+  return path.join(getKnowledgeRoot(), "project");
+}
+
+const DEFAULT_CONFIG: AppConfig = {
+  llm: {
+    engine: "ollama",
+    baseUrl: "http://localhost:11434",
+    model: "llama3.1",
+    temperature: 0.7,
+    topP: 0.9,
+    maxTokens: 1024,
+  },
+  primaryLanguage: "auto",
+  secondaryLanguage: undefined,
+  deepgram_api_key: "",
+  localAsr: {},
+  knowledge: {
+    projectFile: DEFAULT_PROJECT_FILE,
+  },
+};
+
+function mapLegacyLlmConfig(raw: any): Partial<LocalLLMConfig> | undefined {
+  if (!raw) {
+    return undefined;
+  }
+
+  if (raw.api_base || raw.gpt_model) {
+    return {
+      engine: "openaiCompatible",
+      baseUrl: typeof raw.api_base === "string" && raw.api_base.length > 0
+        ? raw.api_base
+        : "http://localhost:1234/v1",
+      model: raw.gpt_model || "gpt-3.5-turbo",
+    };
+  }
+
+  return undefined;
+}
+
+function normalizeAppConfig(raw: any): AppConfig {
+  const normalized: AppConfig = {
+    ...DEFAULT_CONFIG,
+    llm: { ...DEFAULT_CONFIG.llm },
+    knowledge: { ...DEFAULT_CONFIG.knowledge },
+    localAsr: raw?.localAsr ? { ...raw.localAsr } : { ...(DEFAULT_CONFIG.localAsr || {}) },
+  };
+
+  if (raw && typeof raw === "object") {
+    if (raw.primaryLanguage !== undefined) {
+      normalized.primaryLanguage = raw.primaryLanguage;
+    }
+    if (raw.secondaryLanguage !== undefined) {
+      normalized.secondaryLanguage = raw.secondaryLanguage;
+    }
+    if (raw.deepgram_api_key !== undefined) {
+      normalized.deepgram_api_key = raw.deepgram_api_key;
+    }
+    if (raw.knowledge && typeof raw.knowledge === "object") {
+      normalized.knowledge = {
+        ...normalized.knowledge,
+        ...raw.knowledge,
+      };
+    }
+
+    const llmOverrides = raw.llm || mapLegacyLlmConfig(raw) || {};
+    normalized.llm = {
+      ...normalized.llm,
+      ...llmOverrides,
+    };
+
+    if (raw.localAsr && typeof raw.localAsr === "object") {
+      normalized.localAsr = {
+        ...normalized.localAsr,
+        ...raw.localAsr,
+      };
+    }
+  }
+
+  if (!normalized.knowledge) {
+    normalized.knowledge = { projectFile: DEFAULT_PROJECT_FILE };
+  } else if (!normalized.knowledge.projectFile) {
+    normalized.knowledge.projectFile = DEFAULT_PROJECT_FILE;
+  }
+
+  if (!normalized.llm.engine) {
+    normalized.llm.engine = DEFAULT_CONFIG.llm.engine;
+  }
+  if (!normalized.llm.baseUrl) {
+    normalized.llm.baseUrl = DEFAULT_CONFIG.llm.baseUrl;
+  }
+  if (!normalized.llm.model) {
+    normalized.llm.model = DEFAULT_CONFIG.llm.model;
+  }
+
+  return normalized;
+}
+
+function getAppConfig(): AppConfig {
+  try {
+    const storedConfig = store.get("config");
+    if (!storedConfig) {
+      return normalizeAppConfig({});
+    }
+    return normalizeAppConfig(storedConfig);
+  } catch (error) {
+    console.warn("Failed to read stored config, using defaults", error);
+    return normalizeAppConfig({});
+  }
+}
+
+type ChatMessage = {
+  role: "system" | "user" | "assistant";
+  content: string;
+};
+
+function serializeMessageContent(content: any): string {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (!part) {
+          return "";
+        }
+        if (typeof part === "string") {
+          return part;
+        }
+        if (part.type === "text" && typeof part.text === "string") {
+          return part.text;
+        }
+        if (part.type === "image_url" && part.image_url && typeof part.image_url.url === "string") {
+          return `[Image:${part.image_url.url}]`;
+        }
+        if (typeof part.content === "string") {
+          return part.content;
+        }
+        return JSON.stringify(part);
+      })
+      .join("\n");
+  }
+  if (content && typeof content === "object") {
+    if (typeof content.text === "string") {
+      return content.text;
+    }
+    if (typeof content.content === "string") {
+      return content.content;
+    }
+    return JSON.stringify(content);
+  }
+  if (content === undefined || content === null) {
+    return "";
+  }
+  return String(content);
+}
+
+function normalizeMessages(messages: any[]): ChatMessage[] {
+  if (!Array.isArray(messages)) {
+    return [];
+  }
+
+  return messages
+    .map((message) => {
+      const role = typeof message?.role === "string" ? message.role : "user";
+      const normalizedRole: ChatMessage["role"] = role === "system" || role === "assistant" ? role : "user";
+      const content = serializeMessageContent(message?.content);
+      return {
+        role: normalizedRole,
+        content,
+      } as ChatMessage;
+    })
+    .filter((message) => message.content && message.content.trim().length > 0);
+}
+
+function trimTrailingSlash(url: string): string {
+  return url.replace(/\/+$/, "");
+}
+
+function buildOllamaChatUrl(baseUrl: string): string {
+  const trimmed = trimTrailingSlash(baseUrl || DEFAULT_CONFIG.llm.baseUrl);
+  if (trimmed.endsWith("/api/chat")) {
+    return trimmed;
+  }
+  if (trimmed.endsWith("/api")) {
+    return `${trimmed}/chat`;
+  }
+  return `${trimmed}/api/chat`;
+}
+
+function buildOpenAICompatibleUrl(baseUrl: string): string {
+  const trimmed = trimTrailingSlash(baseUrl || DEFAULT_CONFIG.llm.baseUrl);
+  if (trimmed.endsWith("/chat/completions")) {
+    return trimmed;
+  }
+  if (trimmed.endsWith("/v1")) {
+    return `${trimmed}/chat/completions`;
+  }
+  return `${trimmed}/v1/chat/completions`;
+}
+
+async function executeLocalLLMRequest(
+  llmConfig: LocalLLMConfig,
+  messages: ChatMessage[],
+  abortSignal?: AbortSignal
+): Promise<string> {
+  if (!llmConfig || !llmConfig.model) {
+    throw new Error("Local LLM configuration is incomplete. Model name is required.");
+  }
+
+  const engine = llmConfig.engine || DEFAULT_CONFIG.llm.engine;
+  const baseUrl = llmConfig.baseUrl || DEFAULT_CONFIG.llm.baseUrl;
+
+  if (engine === "ollama") {
+    const payload: any = {
+      model: llmConfig.model,
+      messages,
+      stream: false,
+      options: {},
+    };
+
+    if (typeof llmConfig.temperature === "number") {
+      payload.options.temperature = llmConfig.temperature;
+    }
+    if (typeof llmConfig.topP === "number") {
+      payload.options.top_p = llmConfig.topP;
+    }
+    if (typeof llmConfig.maxTokens === "number") {
+      payload.options.num_predict = llmConfig.maxTokens;
+    }
+
+    const response = await axios.post(buildOllamaChatUrl(baseUrl), payload, {
+      signal: abortSignal,
+      timeout: 120000,
+    });
+
+    const data = response.data;
+    if (data?.message?.content) {
+      return data.message.content;
+    }
+    if (Array.isArray(data?.messages)) {
+      return data.messages.map((msg: any) => msg?.content ?? "").join("\n").trim();
+    }
+    if (typeof data === "string") {
+      return data;
+    }
+    if (typeof data?.response === "string") {
+      return data.response;
+    }
+    throw new Error("Ollama response missing content.");
+  }
+
+  const url = buildOpenAICompatibleUrl(baseUrl);
+  const payload: any = {
+    model: llmConfig.model,
+    messages,
+  };
+  if (typeof llmConfig.temperature === "number") {
+    payload.temperature = llmConfig.temperature;
+  }
+  if (typeof llmConfig.topP === "number") {
+    payload.top_p = llmConfig.topP;
+  }
+  if (typeof llmConfig.maxTokens === "number") {
+    payload.max_tokens = llmConfig.maxTokens;
+  }
+
+  const response = await axios.post(url, payload, {
+    signal: abortSignal,
+    timeout: 120000,
+  });
+
+  const data = response.data;
+  if (Array.isArray(data?.choices) && data.choices.length > 0) {
+    const choice = data.choices[0];
+    if (choice?.message?.content) {
+      return choice.message.content;
+    }
+    if (choice?.text) {
+      return choice.text;
+    }
+  }
+
+  if (typeof data === "string") {
+    return data;
+  }
+
+  throw new Error("Local LLM response missing content.");
+}
+
 try {
-  const initialConfig = store.get("config");
+  const initialConfig = getAppConfig();
+  store.set("config", initialConfig);
   if (initialConfig && typeof initialConfig === "object") {
     localAsrManager.configure(initialConfig.localAsr);
   }
@@ -179,13 +514,14 @@ try {
 }
 
 ipcMain.handle("get-config", () => {
-  return store.get("config");
+  return getAppConfig();
 });
 
 ipcMain.handle("set-config", (event, config) => {
-  store.set("config", config);
-  if (config && typeof config === "object") {
-    localAsrManager.configure(config.localAsr);
+  const normalized = normalizeAppConfig(config);
+  store.set("config", normalized);
+  if (normalized && typeof normalized === "object") {
+    localAsrManager.configure(normalized.localAsr);
   }
 });
 
@@ -226,17 +562,8 @@ ipcMain.handle("highlightCode", async (event, code, language) => {
 });
 
 app.on("before-quit", () => {
-  const config = store.get("config") || {};
-  const apiInfo = {
-    openai_key: config.openai_key || "",
-    api_base: config.api_base || "",
-    gpt_model: config.gpt_model || "",
-    api_call_method: config.api_call_method || "direct",
-    primaryLanguage: config.primaryLanguage || "en",
-    deepgram_api_key: config.deepgram_api_key || "",
-  };
-  store.clear();
-  store.set("config", apiInfo);
+  const config = getAppConfig();
+  store.set("config", config);
 });
 
 ipcMain.handle("get-system-audio-stream", async () => {
@@ -314,47 +641,30 @@ app.on("ready", () => {
   );
 });
 
-ipcMain.handle("test-api-config", async (event, config) => {
+ipcMain.handle("test-local-llm", async (event, config) => {
   try {
-    const axiosInstance = axios.create({
-      baseURL: normalizeApiBaseUrl(config.api_base),
-      headers: {
-        Authorization: `Bearer ${config.openai_key}`,
-        "Content-Type": "application/json",
-      },
-    });
-
-    const response = await axiosInstance.post("/chat/completions", {
-      model: config.gpt_model || "gpt-3.5-turbo",
-      messages: [{ role: "user", content: "Hello, this is a test." }],
-    });
-
-    if (
-      response.data.choices &&
-      response.data.choices[0] &&
-      response.data.choices[0].message
-    ) {
-      return { success: true };
-    } else {
-      return { success: false, error: "Unexpected API response structure" };
-    }
+    const normalized = normalizeAppConfig(config || getAppConfig());
+    const testMessages = [
+      { role: "system", content: "You are a diagnostic probe." },
+      { role: "user", content: "Respond with the single word: READY." },
+    ];
+    const result = await executeLocalLLMRequest(normalized.llm, normalizeMessages(testMessages));
+    const success = typeof result === "string" && result.toUpperCase().includes("READY");
+    return success
+      ? { success: true }
+      : { success: false, error: "Local LLM responded unexpectedly." };
   } catch (error) {
     if (axios.isAxiosError(error)) {
       if (error.response) {
         return {
           success: false,
-          error: `Server responded with error: ${error.response.status} ${error.response.statusText}`,
+          error: `Local LLM error: ${error.response.status} ${error.response.statusText}`,
         };
-      } else if (error.request) {
+      }
+      if (error.request) {
         return {
           success: false,
-          error:
-            "No response received from server. Please check your network connection and API base URL.",
-        };
-      } else {
-        return {
-          success: false,
-          error: `Error setting up the request: ${error.message}`,
+          error: "Local LLM did not respond. Verify the engine is running and reachable.",
         };
       }
     }
@@ -365,36 +675,17 @@ ipcMain.handle("test-api-config", async (event, config) => {
   }
 });
 
-ipcMain.handle("callOpenAI", async (event, { config, messages, signal }) => {
+ipcMain.handle("call-local-llm", async (event, { config, messages }) => {
   try {
-    const openai = new OpenAI({
-      apiKey: config.openai_key,
-      baseURL: normalizeApiBaseUrl(config.api_base),
-    });
-
-    const abortController = new AbortController();
-    if (signal) {
-      signal.addEventListener('abort', () => abortController.abort());
-    }
-
-    const response = await openai.chat.completions.create({
-      model: config.gpt_model || "gpt-3.5-turbo",
-      messages: messages,
-    }, { signal: abortController.signal });
-
-    if (
-      !response.choices ||
-      !response.choices[0] ||
-      !response.choices[0].message
-    ) {
-      throw new Error("Unexpected API response structure");
-    }
-    return { content: response.choices[0].message.content };
-  } catch (error) {
-    if (error.name === "AbortError") {
+    const normalized = normalizeAppConfig(config || getAppConfig());
+    const formattedMessages = normalizeMessages(messages);
+    const content = await executeLocalLLMRequest(normalized.llm, formattedMessages);
+    return { content };
+  } catch (error: any) {
+    if (error?.name === "AbortError") {
       return { error: "AbortError" };
     }
-    return { error: error.message || "Unknown error occurred" };
+    return { error: error?.message || "Unknown error occurred" };
   }
 });
 
@@ -547,6 +838,125 @@ ipcMain.on("send-audio-to-local-asr", (event, audioData) => {
 ipcMain.handle("stop-local-asr", async () => {
   await localAsrManager.stopSession();
   return { success: true };
+});
+
+function toTitleCaseFromFileName(fileName: string): string {
+  return fileName
+    .replace(/\.md$/i, "")
+    .replace(/[-_]/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+ipcMain.handle("load-knowledge-context", async () => {
+  try {
+    const config = getAppConfig();
+    const permanentDir = getPermanentKnowledgeDir();
+    const projectDir = getProjectKnowledgeDir();
+
+    ensureDirectoryExists(permanentDir);
+    ensureDirectoryExists(projectDir);
+
+    const permanentFiles = fs
+      .readdirSync(permanentDir)
+      .filter((file) => file.toLowerCase().endsWith(".md"));
+
+    const permanent = permanentFiles.map((fileName) => {
+      const filePath = path.join(permanentDir, fileName);
+      const content = fs.readFileSync(filePath, "utf-8");
+      return {
+        fileName,
+        title: toTitleCaseFromFileName(fileName),
+        content,
+        path: filePath,
+      };
+    });
+
+    const projectFileName = config.knowledge?.projectFile || DEFAULT_PROJECT_FILE;
+    const projectPath = path.join(projectDir, projectFileName);
+    let projectContent = "";
+    if (fs.existsSync(projectPath)) {
+      projectContent = fs.readFileSync(projectPath, "utf-8");
+    }
+
+    const availableProjects = fs
+      .readdirSync(projectDir)
+      .filter((file) => file.toLowerCase().endsWith(".md"));
+
+    return {
+      permanent,
+      project: {
+        fileName: projectFileName,
+        title: toTitleCaseFromFileName(projectFileName),
+        content: projectContent,
+        path: projectPath,
+      },
+      availableProjects,
+    };
+  } catch (error) {
+    return {
+      permanent: [],
+      project: null,
+      availableProjects: [],
+      error: error instanceof Error ? error.message : "Failed to load knowledge context",
+    };
+  }
+});
+
+ipcMain.handle("save-project-knowledge", async (event, { content, fileName }) => {
+  try {
+    const config = getAppConfig();
+    const projectDir = getProjectKnowledgeDir();
+    ensureDirectoryExists(projectDir);
+
+    const targetFileName = (fileName as string) || config.knowledge?.projectFile || DEFAULT_PROJECT_FILE;
+    const projectPath = path.join(projectDir, targetFileName);
+    fs.writeFileSync(projectPath, content ?? "", "utf-8");
+
+    if (targetFileName !== config.knowledge?.projectFile) {
+      const updatedConfig = {
+        ...config,
+        knowledge: {
+          ...(config.knowledge || {}),
+          projectFile: targetFileName,
+        },
+      };
+      store.set("config", updatedConfig);
+    }
+
+    return { success: true };
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Failed to save project knowledge",
+    };
+  }
+});
+
+ipcMain.handle("set-active-project", async (event, fileName: string) => {
+  try {
+    const config = getAppConfig();
+    const projectDir = getProjectKnowledgeDir();
+    ensureDirectoryExists(projectDir);
+    const sanitizedFileName = fileName && fileName.endsWith(".md") ? fileName : `${fileName}.md`;
+    const projectPath = path.join(projectDir, sanitizedFileName);
+    if (!fs.existsSync(projectPath)) {
+      fs.writeFileSync(projectPath, `# ${toTitleCaseFromFileName(sanitizedFileName)}\n`);
+    }
+    const updatedConfig = {
+      ...config,
+      knowledge: {
+        ...(config.knowledge || {}),
+        projectFile: sanitizedFileName,
+      },
+    };
+    store.set("config", updatedConfig);
+    return { success: true };
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Failed to set active project",
+    };
+  }
 });
 
 // Handle reading prompt template files

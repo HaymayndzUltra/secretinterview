@@ -18,7 +18,6 @@ import ReactMarkdown from 'react-markdown';
 import { buildInterviewPrompt } from '../utils/promptBuilder';
 import { processConversationExchange } from '../services/conversationMemory';
 import TeleprompterViewer from "../components/TeleprompterViewer";
-import OpenAI from 'openai';
 
 const InterviewPage: React.FC = () => {
   const {
@@ -32,6 +31,7 @@ const InterviewPage: React.FC = () => {
     templateContent,
     addConversationSummary,
     getRelevantSummaries,
+    knowledgeDocuments,
   } = useKnowledgeBase();
   const { error, setError, clearError } = useError();
   const {
@@ -128,7 +128,12 @@ const InterviewPage: React.FC = () => {
       const config = await window.electronAPI.getConfig();
       
       // Build the system prompt using the prompt builder
-      let systemPrompt = buildInterviewPrompt(profileSummary, selectedScenario, knowledgeBase);
+      let systemPrompt = buildInterviewPrompt(
+        profileSummary,
+        selectedScenario,
+        knowledgeBase,
+        knowledgeDocuments
+      );
       
       // Merge template content if available
       if (templateContent) {
@@ -153,27 +158,31 @@ const InterviewPage: React.FC = () => {
         });
       }
       
-      const knowledgeMessages: OpenAI.Chat.ChatCompletionMessageParam[] = knowledgeEntriesForPrompt.map(entry => {
+      const knowledgeMessages = knowledgeEntriesForPrompt.map(entry => {
         if (entry.content.startsWith('data:image')) {
           return {
-            role: "user" as const,
-            content: [{ type: "image_url", image_url: { url: entry.content } } as const],
-          } as OpenAI.Chat.ChatCompletionUserMessageParam;
+            role: 'user' as const,
+            content: `[${entry.category.toUpperCase()} IMAGE] ${entry.tags.join(', ')}`,
+          };
         }
 
         const formattedContent = `[${entry.category.toUpperCase()} | confidence:${entry.confidence.toFixed(2)}] ${entry.content}`;
-        return { role: "user", content: formattedContent } as OpenAI.Chat.ChatCompletionUserMessageParam;
+        return { role: 'user' as const, content: formattedContent };
       });
 
+      const recentConversations = conversations.slice(-10).map(conv => ({
+        role: conv.role === 'assistant' ? 'assistant' as const : conv.role === 'system' ? 'system' as const : 'user' as const,
+        content: conv.content,
+      }));
+
       const messages = [
-        { role: "system", content: systemPrompt + conversationContext },
+        { role: 'system' as const, content: systemPrompt + conversationContext },
         ...knowledgeMessages,
-        // Only include recent conversations (last 5 exchanges) to avoid token limits
-        ...conversations.slice(-10),
-        { role: "user", content: contentToProcess }
+        ...recentConversations,
+        { role: 'user' as const, content: contentToProcess }
       ];
 
-      const response = await window.electronAPI.callOpenAI({
+      const response = await window.electronAPI.callLocalLLM({
         config: config,
         messages: messages
       });
@@ -220,7 +229,7 @@ const InterviewPage: React.FC = () => {
         // Don't fail the main conversation if summary generation fails
       }
     } catch (error) {
-      setError('Failed to get response from GPT. Please try again.');
+      setError('Failed to get response from the local language model. Please try again.');
     } finally {
       setIsLoading(false);
       if (aiResponseRef.current) {
@@ -336,17 +345,17 @@ const InterviewPage: React.FC = () => {
       const config = await window.electronAPI.getConfig();
       const localStatusResponse = await window.electronAPI.checkLocalAsrAvailability();
       setLocalAsrStatus(localStatusResponse);
-      const hasOpenAI = Boolean(config && config.openai_key);
+      const hasLocalLLM = Boolean(config?.llm && config.llm.model);
       const hasLocal = Boolean(localStatusResponse && localStatusResponse.available);
       const hasDeepgram = Boolean(config && config.deepgram_api_key);
 
-      if (hasOpenAI && (hasLocal || hasDeepgram)) {
+      if (hasLocalLLM && (hasLocal || hasDeepgram)) {
         setIsConfigured(true);
         clearError();
       } else {
         setIsConfigured(false);
-        if (!hasOpenAI) {
-          setError('OpenAI API key not configured. Please check settings.');
+        if (!hasLocalLLM) {
+          setError('Local LLM engine not configured. Please update settings.');
         } else {
           setError('No transcription engine available. Configure a local ASR engine or provide a Deepgram API key.');
         }

@@ -7,13 +7,13 @@ export interface ProfileExtractionResult {
 }
 
 /**
- * Extracts structured profile information from parsed file text using OpenAI function calling
+ * Extracts structured profile information from parsed file text using the configured local LLM
  * @param fileText - The parsed text content from uploaded files
  * @returns Promise<ProfileExtractionResult> - Structured profile data or error
  */
 export async function extractProfileFromText(fileText: string): Promise<ProfileExtractionResult> {
   try {
-    // Get the OpenAI configuration
+    // Get the current configuration
     const config = await window.electronAPI.getConfig();
     
     // Create the prompt for profile extraction
@@ -37,14 +37,14 @@ export async function extractProfileFromText(fileText: string): Promise<ProfileE
 
     const userPrompt = `Please extract profile information from the following text:\n\n${fileText}`;
 
-    // Prepare messages for OpenAI API call
+    // Prepare messages for the local LLM call
     const messages = [
       { role: "system", content: systemPrompt },
       { role: "user", content: userPrompt }
     ];
 
-    // Call OpenAI
-    const response = await window.electronAPI.callOpenAI({
+    // Call local LLM
+    const response = await window.electronAPI.callLocalLLM({
       config: config,
       messages: messages
     });
@@ -52,11 +52,11 @@ export async function extractProfileFromText(fileText: string): Promise<ProfileE
     if ('error' in response) {
       return {
         success: false,
-        error: `OpenAI API error: ${response.error}`
+        error: `Local LLM error: ${response.error}`
       };
     }
 
-    // Parse the JSON response from OpenAI
+    // Parse the JSON response from the LLM
     try {
       const extractedData = JSON.parse(response.content);
       

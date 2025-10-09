@@ -1,6 +1,6 @@
 export interface ElectronAPI {
   saveTempAudioFile(audioEncoded: ArrayBuffer): unknown;
-  transcribeAudioFile(tempFilePath: any, arg1: { primaryLanguage: string; secondaryLanguage: string; api_base: any; openai_key: any; }): TranscriptionResult | PromiseLike<TranscriptionResult>;
+  transcribeAudioFile(tempFilePath: any, options: any): TranscriptionResult | PromiseLike<TranscriptionResult>;
   getConfig: () => Promise<any>;
   setConfig: (config: any) => Promise<void>;
   testAPIConfig: (config: any) => Promise<{ success: boolean, error?: string }>;
@@ -16,14 +16,19 @@ export interface ElectronAPI {
     on(channel: string, listener: (event: any, ...args: any[]) => void): () => void;
     removeListener(channel: string, listener: (...args: any[]) => void): void;
   };
-  callOpenAI: (params: {
-    config: any;
+  invokeLocalLlm: (params: {
     messages: any[];
-    signal?: AbortSignal;
+    options?: any;
+    config?: any;
   }) => Promise<{ content: string } | { error: string }>;
   transcribeAudio: (audioBuffer: ArrayBuffer, config: any) => Promise<TranscriptionResult>;
   readPromptTemplate: (templateName: string) => Promise<{ content: string } | { error: string }>;
   listPromptTemplates: () => Promise<{ templates: Array<{ name: string; filename: string }> } | { error: string }>;
+  loadKnowledgeDocuments: () => Promise<{
+    permanent: Array<{ title: string; filename: string; content: string; layer: string }>;
+    project: { title: string; filename: string; content: string; layer: string } | null;
+    error?: string;
+  }>;
   checkLocalAsrAvailability: () => Promise<any>;
   startLocalAsr: (options: any) => Promise<{ success: boolean; error?: string }>;
   stopLocalAsr: () => Promise<{ success: boolean }>;

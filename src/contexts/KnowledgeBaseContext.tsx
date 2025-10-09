@@ -1,4 +1,4 @@
-import React, { createContext, useState, useContext, ReactNode, useEffect } from 'react';
+import React, { createContext, useState, useContext, ReactNode, useEffect, useCallback } from 'react';
 import { InterviewScenario, getScenarioById } from '../utils/promptBuilder';
 
 export enum KnowledgeCategory {
@@ -52,6 +52,18 @@ interface PromptTemplate {
   filename: string;
 }
 
+export interface KnowledgeDocument {
+  title: string;
+  filename: string;
+  content: string;
+  layer: 'permanent' | 'project';
+}
+
+export interface KnowledgeLayers {
+  permanent: KnowledgeDocument[];
+  project: KnowledgeDocument | null;
+}
+
 interface KnowledgeBaseContextType {
   knowledgeBase: Record<KnowledgeCategory, KnowledgeEntry[]>;
   addToKnowledgeBase: (entry: {
@@ -87,6 +99,8 @@ interface KnowledgeBaseContextType {
   deleteConversationSummary: (id: string) => void;
   clearConversationSummaries: () => void;
   getRelevantSummaries: (query: string, limit?: number) => Promise<ConversationSummary[]>;
+  knowledgeLayers: KnowledgeLayers;
+  refreshKnowledgeLayers: () => Promise<void>;
 }
 
 const KnowledgeBaseContext = createContext<KnowledgeBaseContextType | undefined>(undefined);
@@ -110,6 +124,7 @@ export const KnowledgeBaseProvider: React.FC<{ children: ReactNode }> = ({ child
   const [selectedTemplate, setSelectedTemplate] = useState<string | null>(null);
   const [templateContent, setTemplateContent] = useState<string | null>(null);
   const [conversationSummaries, setConversationSummaries] = useState<ConversationSummary[]>([]);
+  const [knowledgeLayers, setKnowledgeLayers] = useState<KnowledgeLayers>({ permanent: [], project: null });
 
   useEffect(() => {
     const savedKnowledgeBase = localStorage.getItem('knowledgeBase');
@@ -195,6 +210,28 @@ export const KnowledgeBaseProvider: React.FC<{ children: ReactNode }> = ({ child
     // Load available templates on startup
     loadAvailableTemplates();
   }, []);
+
+  const refreshKnowledgeLayers = useCallback(async () => {
+    try {
+      if (!window?.electronAPI?.loadKnowledgeDocuments) {
+        setKnowledgeLayers({ permanent: [], project: null });
+        return;
+      }
+
+      const result = await window.electronAPI.loadKnowledgeDocuments();
+      setKnowledgeLayers({
+        permanent: Array.isArray(result.permanent) ? result.permanent : [],
+        project: result.project ?? null,
+      });
+    } catch (error) {
+      console.error('Failed to load knowledge documents:', error);
+      setKnowledgeLayers({ permanent: [], project: null });
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshKnowledgeLayers();
+  }, [refreshKnowledgeLayers]);
 
   useEffect(() => {
     localStorage.setItem('knowledgeBase', JSON.stringify(knowledgeBase));
@@ -459,6 +496,8 @@ export const KnowledgeBaseProvider: React.FC<{ children: ReactNode }> = ({ child
         deleteConversationSummary,
         clearConversationSummaries,
         getRelevantSummaries,
+        knowledgeLayers,
+        refreshKnowledgeLayers,
       }}
     >
       {children}

@@ -11,7 +11,6 @@ import {
 declare const MAIN_WINDOW_WEBPACK_ENTRY: string;
 declare const MAIN_WINDOW_PRELOAD_WEBPACK_ENTRY: string;
 import Prism from "prismjs";
-import OpenAI from "openai";
 import axios from "axios";
 import FormData from "form-data";
 import fs from "fs";
@@ -19,6 +18,13 @@ import path from "path";
 import { Buffer } from "buffer";
 import { createClient, LiveTranscriptionEvents } from "@deepgram/sdk";
 import LocalAsrManager from "./local-asr/LocalAsrManager";
+import {
+  LocalLlmClient,
+  LocalLlmConfig,
+  LocalLlmProvider,
+  sanitizeMessages,
+} from "./local-llm/LocalLlmClient";
+import { LlmMessage } from "./types/llm";
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
 import electronSquirrelStartup from "electron-squirrel-startup";
@@ -45,7 +51,7 @@ const createWindow = (): void => {
         responseHeaders: {
           ...details.responseHeaders,
           "Content-Security-Policy": [
-            "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; connect-src 'self' https://api.openai.com;",
+            "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; connect-src 'self' http://localhost:* https://localhost:* data:;",
           ],
         },
       });
@@ -169,23 +175,216 @@ type TypedElectronStore = ElectronStore<StoreSchema> & {
 const store = new ElectronStore<StoreSchema>() as TypedElectronStore;
 const localAsrManager = new LocalAsrManager();
 
+type StoredLocalLlmConfig = Partial<LocalLlmConfig> & {
+  provider?: LocalLlmProvider;
+};
+
+interface AppConfig extends Record<string, any> {
+  localLlm?: StoredLocalLlmConfig;
+  primaryLanguage?: string;
+  secondaryLanguage?: string;
+  deepgram_api_key?: string;
+  localAsr?: any;
+  projectKnowledgeFile?: string;
+}
+
+const DEFAULT_LOCAL_LLM_CONFIG: StoredLocalLlmConfig = {
+  provider: "ollama",
+  baseUrl: "http://localhost:11434",
+  model: "",
+  temperature: 0.7,
+  top_p: 0.9,
+};
+
+const DEFAULT_APP_CONFIG: AppConfig = {
+  localLlm: DEFAULT_LOCAL_LLM_CONFIG,
+  primaryLanguage: "auto",
+  secondaryLanguage: "",
+};
+
+interface KnowledgeDocumentPayload {
+  title: string;
+  filename: string;
+  content: string;
+  layer: "permanent" | "project";
+}
+
+function mergeConfig(rawConfig: any): AppConfig {
+  const normalized: AppConfig = {
+    ...DEFAULT_APP_CONFIG,
+    ...(rawConfig && typeof rawConfig === "object" ? rawConfig : {}),
+  };
+
+  normalized.localLlm = {
+    ...DEFAULT_LOCAL_LLM_CONFIG,
+    ...(normalized.localLlm || {}),
+  };
+
+  if (typeof normalized.primaryLanguage !== "string") {
+    normalized.primaryLanguage = DEFAULT_APP_CONFIG.primaryLanguage;
+  }
+
+  if (typeof normalized.secondaryLanguage !== "string") {
+    normalized.secondaryLanguage = DEFAULT_APP_CONFIG.secondaryLanguage;
+  }
+
+  return normalized;
+}
+
+function buildLocalLlmConfiguration(rawConfig?: StoredLocalLlmConfig): LocalLlmConfig | null {
+  if (!rawConfig || typeof rawConfig !== "object") {
+    return null;
+  }
+
+  const provider = (rawConfig.provider as LocalLlmProvider) || "openai-compatible";
+  const baseUrl = typeof rawConfig.baseUrl === "string" ? rawConfig.baseUrl.trim() : "";
+  const model = typeof rawConfig.model === "string" ? rawConfig.model.trim() : "";
+
+  if (!baseUrl || !model) {
+    return null;
+  }
+
+  return {
+    provider,
+    baseUrl,
+    model,
+    requestTimeoutMs: rawConfig.requestTimeoutMs ? Number(rawConfig.requestTimeoutMs) : undefined,
+    temperature: rawConfig.temperature !== undefined ? Number(rawConfig.temperature) : undefined,
+    top_p: rawConfig.top_p !== undefined ? Number(rawConfig.top_p) : undefined,
+    max_tokens: rawConfig.max_tokens !== undefined ? Number(rawConfig.max_tokens) : undefined,
+    extraParams:
+      rawConfig.extraParams && typeof rawConfig.extraParams === "object"
+        ? rawConfig.extraParams
+        : undefined,
+  };
+}
+
+function resolveKnowledgeRoot(): string {
+  const candidates = [
+    path.join(app.getAppPath(), "knowledge"),
+    path.join(process.cwd(), "knowledge"),
+    path.join(__dirname, "knowledge"),
+    path.join(__dirname, "..", "knowledge"),
+  ];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return candidates[0];
+}
+
+function resolveProjectKnowledgePath(rawPath?: string): string {
+  const knowledgeRoot = resolveKnowledgeRoot();
+
+  if (rawPath && typeof rawPath === "string" && rawPath.trim()) {
+    return path.isAbsolute(rawPath)
+      ? rawPath
+      : path.join(knowledgeRoot, rawPath);
+  }
+
+  return path.join(knowledgeRoot, "project", "current_project.md");
+}
+
+function formatDocumentTitle(filename: string): string {
+  return filename
+    .replace(/\.md$/i, "")
+    .replace(/[\-_]/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function readKnowledgeDocumentsFromDisk(projectFilePath?: string): {
+  permanent: KnowledgeDocumentPayload[];
+  project: KnowledgeDocumentPayload | null;
+} {
+  const knowledgeRoot = resolveKnowledgeRoot();
+  const permanentDir = path.join(knowledgeRoot, "permanent");
+  const permanentDocs: KnowledgeDocumentPayload[] = [];
+
+  if (fs.existsSync(permanentDir)) {
+    const files = fs
+      .readdirSync(permanentDir)
+      .filter((file) => file.endsWith(".md"))
+      .sort();
+
+    for (const file of files) {
+      const absolutePath = path.join(permanentDir, file);
+      try {
+        const content = fs.readFileSync(absolutePath, "utf-8");
+        permanentDocs.push({
+          title: formatDocumentTitle(file),
+          filename: file,
+          content,
+          layer: "permanent",
+        });
+      } catch (error) {
+        console.error(`Failed to read knowledge document: ${absolutePath}`, error);
+      }
+    }
+  }
+
+  let projectDoc: KnowledgeDocumentPayload | null = null;
+  const projectPath = projectFilePath || resolveProjectKnowledgePath();
+
+  if (projectPath && fs.existsSync(projectPath)) {
+    try {
+      const content = fs.readFileSync(projectPath, "utf-8");
+      const knowledgeRootRelative = path.relative(knowledgeRoot, projectPath) || path.basename(projectPath);
+      projectDoc = {
+        title: formatDocumentTitle(path.basename(projectPath)),
+        filename: knowledgeRootRelative,
+        content,
+        layer: "project",
+      };
+    } catch (error) {
+      console.error(`Failed to read project knowledge document: ${projectPath}`, error);
+    }
+  }
+
+  return { permanent: permanentDocs, project: projectDoc };
+}
+
+function getMergedConfig(): AppConfig {
+  const stored = store.get("config");
+  return mergeConfig(stored);
+}
+
 try {
-  const initialConfig = store.get("config");
+  const initialConfig = getMergedConfig();
   if (initialConfig && typeof initialConfig === "object") {
     localAsrManager.configure(initialConfig.localAsr);
   }
+  store.set("config", initialConfig);
 } catch (error) {
   console.error("Failed to initialize local ASR config", error);
 }
 
 ipcMain.handle("get-config", () => {
-  return store.get("config");
+  return getMergedConfig();
 });
 
 ipcMain.handle("set-config", (event, config) => {
-  store.set("config", config);
-  if (config && typeof config === "object") {
-    localAsrManager.configure(config.localAsr);
+  const merged = mergeConfig(config);
+  store.set("config", merged);
+  if (merged && typeof merged === "object") {
+    localAsrManager.configure(merged.localAsr);
+  }
+});
+
+ipcMain.handle("load-knowledge-documents", async () => {
+  try {
+    const config = getMergedConfig();
+    const projectPath = resolveProjectKnowledgePath(config.projectKnowledgeFile);
+    return readKnowledgeDocumentsFromDisk(projectPath);
+  } catch (error) {
+    console.error("Failed to load knowledge documents", error);
+    return {
+      permanent: [],
+      project: null,
+      error: error instanceof Error ? error.message : "Unknown error",
+    };
   }
 });
 
@@ -226,17 +425,8 @@ ipcMain.handle("highlightCode", async (event, code, language) => {
 });
 
 app.on("before-quit", () => {
-  const config = store.get("config") || {};
-  const apiInfo = {
-    openai_key: config.openai_key || "",
-    api_base: config.api_base || "",
-    gpt_model: config.gpt_model || "",
-    api_call_method: config.api_call_method || "direct",
-    primaryLanguage: config.primaryLanguage || "en",
-    deepgram_api_key: config.deepgram_api_key || "",
-  };
-  store.clear();
-  store.set("config", apiInfo);
+  const config = getMergedConfig();
+  store.set("config", config);
 });
 
 ipcMain.handle("get-system-audio-stream", async () => {
@@ -314,87 +504,58 @@ app.on("ready", () => {
   );
 });
 
-ipcMain.handle("test-api-config", async (event, config) => {
+ipcMain.handle("test-api-config", async (event, partialConfig) => {
   try {
-    const axiosInstance = axios.create({
-      baseURL: normalizeApiBaseUrl(config.api_base),
-      headers: {
-        Authorization: `Bearer ${config.openai_key}`,
-        "Content-Type": "application/json",
-      },
-    });
+    const merged = mergeConfig({ ...getMergedConfig(), ...partialConfig });
+    const localLlmConfig = buildLocalLlmConfiguration(merged.localLlm);
 
-    const response = await axiosInstance.post("/chat/completions", {
-      model: config.gpt_model || "gpt-3.5-turbo",
-      messages: [{ role: "user", content: "Hello, this is a test." }],
-    });
-
-    if (
-      response.data.choices &&
-      response.data.choices[0] &&
-      response.data.choices[0].message
-    ) {
-      return { success: true };
-    } else {
-      return { success: false, error: "Unexpected API response structure" };
+    if (!localLlmConfig) {
+      return {
+        success: false,
+        error: "Local LLM configuration is incomplete. Provide base URL and model.",
+      };
     }
+
+    const client = new LocalLlmClient(localLlmConfig);
+    const messages: LlmMessage[] = [
+      { role: "system", content: "You are running a diagnostics check." },
+      { role: "user", content: "Reply with the single word OK if you received this message." },
+    ];
+
+    const result = await client.invoke({ messages: sanitizeMessages(messages) });
+
+    if (!result.content || typeof result.content !== "string") {
+      return { success: false, error: "Local LLM responded without usable text." };
+    }
+
+    return { success: true };
   } catch (error) {
-    if (axios.isAxiosError(error)) {
-      if (error.response) {
-        return {
-          success: false,
-          error: `Server responded with error: ${error.response.status} ${error.response.statusText}`,
-        };
-      } else if (error.request) {
-        return {
-          success: false,
-          error:
-            "No response received from server. Please check your network connection and API base URL.",
-        };
-      } else {
-        return {
-          success: false,
-          error: `Error setting up the request: ${error.message}`,
-        };
-      }
-    }
-    return {
-      success: false,
-      error: error instanceof Error ? error.message : "Unknown error occurred",
-    };
+    const message = error instanceof Error ? error.message : "Unknown error occurred";
+    return { success: false, error: message };
   }
 });
 
-ipcMain.handle("callOpenAI", async (event, { config, messages, signal }) => {
+ipcMain.handle("invoke-local-llm", async (event, { messages, options, config: overrideConfig }) => {
   try {
-    const openai = new OpenAI({
-      apiKey: config.openai_key,
-      baseURL: normalizeApiBaseUrl(config.api_base),
-    });
+    const merged = mergeConfig({ ...getMergedConfig(), ...(overrideConfig || {}) });
+    const localLlmConfig = buildLocalLlmConfiguration(merged.localLlm);
 
-    const abortController = new AbortController();
-    if (signal) {
-      signal.addEventListener('abort', () => abortController.abort());
+    if (!localLlmConfig) {
+      throw new Error("Local LLM is not configured. Set the base URL and model in Settings.");
     }
 
-    const response = await openai.chat.completions.create({
-      model: config.gpt_model || "gpt-3.5-turbo",
-      messages: messages,
-    }, { signal: abortController.signal });
-
-    if (
-      !response.choices ||
-      !response.choices[0] ||
-      !response.choices[0].message
-    ) {
-      throw new Error("Unexpected API response structure");
+    if (!Array.isArray(messages)) {
+      throw new Error("Messages payload must be an array.");
     }
-    return { content: response.choices[0].message.content };
+
+    const client = new LocalLlmClient(localLlmConfig);
+    const sanitizedMessages = sanitizeMessages(messages as LlmMessage[]);
+    const result = await client.invoke({ messages: sanitizedMessages, options });
+
+    return { content: result.content };
   } catch (error) {
-    if (error.name === "AbortError") {
-      return { error: "AbortError" };
-    }
-    return { error: error.message || "Unknown error occurred" };
+    const message = error instanceof Error ? error.message : "Unknown error occurred";
+    return { error: message };
   }
 });
 
@@ -414,7 +575,7 @@ ipcMain.handle("get-desktop-sources", async () => {
 });
 
 function normalizeApiBaseUrl(url: string): string {
-  if (!url) return "https://api.openai.com/v1";
+  if (!url) return "http://localhost:11434/v1";
   url = url.trim();
   if (!url.startsWith("http://") && !url.startsWith("https://")) {
     url = "https://" + url;
